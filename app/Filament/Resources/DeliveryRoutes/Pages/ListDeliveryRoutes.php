@@ -22,12 +22,61 @@ use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
+use Illuminate\Database\Eloquent\Builder;
 
 class ListDeliveryRoutes extends ListRecords
 {
     protected static string $resource =
         DeliveryRouteResource::class;
+    /*
+|--------------------------------------------------------------------------
+| TABLE QUERY
+|--------------------------------------------------------------------------
+|
+| Halaman LIST membaca langsung dari summary VIEW.
+|
+| Sengaja tidak memakai:
+|
+| DeliveryRouteResource::getEloquentQuery()
+|
+| supaya eager loading branch, driver, vehicle,
+| dan vehicleType tidak dijalankan pada halaman list.
+|
+*/
 
+    protected function getTableQuery(): ?Builder
+    {
+        $query =
+            DeliveryRoute::query()
+
+                ->from(
+                    'vw_delivery_route_summary as delivery_routes'
+                );
+
+    /*
+    |--------------------------------------------------------------------------
+    | BRANCH CONTEXT
+    |--------------------------------------------------------------------------
+    |
+    | Tetap mengikuti branch aktif seperti Resource existing.
+    |
+    */
+
+        $branchId =
+            app(
+                BranchContext::class
+            )->getId();
+
+        if ($branchId) {
+
+            $query->where(
+                'delivery_routes.branch_id',
+                $branchId
+            );
+        }
+
+        return $query;
+    }
 
     protected function getHeaderActions(): array
     {

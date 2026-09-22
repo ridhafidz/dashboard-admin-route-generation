@@ -8,7 +8,8 @@ use App\Models\Store;
 
 class AreaAssignmentService
 {
-    protected const RADIUS_KM = 10;
+    protected const CENTROID_RADIUS_KM = 5.0;
+    protected const MAX_MEMBER_DISTANCE_KM = 6.0;
 
     protected function haversineKm(
         float $lat1,
@@ -49,51 +50,168 @@ class AreaAssignmentService
     protected function findNearbyArea(
         Branch $branch,
         float $lat,
-        float $lng
+        float $lng,
+        ?int $excludeStoreId = null
     ): ?Area {
+
         $nearestArea = null;
         $nearestDistance = null;
 
-        $areas = Area::query()
-            ->where('branch_id', $branch->id)
+
+        $areas =
+            Area::query()
+            ->where(
+                'branch_id',
+                $branch->id
+            )
             ->get();
 
-        foreach ($areas as $area) {
-            $centroid = Store::query()
-                ->where('area_id', $area->id)
-                ->whereNotNull('latitude')
-                ->whereNotNull('longitude')
-                ->selectRaw(
-                    'AVG(latitude) as avg_lat, AVG(longitude) as avg_lng'
-                )
-                ->first();
 
+        foreach ($areas as $area) {
+
+            /*
+            |--------------------------------------------------------------------------
+            | ANGGOTA AREA
+            |--------------------------------------------------------------------------
+            */
+
+            $members =
+                Store::query()
+                    ->where(
+                        'area_id',
+                        $area->id
+                    )
+                    ->when(
+                        $excludeStoreId !== null,
+                        fn($query) =>
+                        $query->where(
+                            'id',
+                            '!=',
+                            $excludeStoreId
+                        )
+                    )
+                    ->whereNotNull(
+                        'latitude'
+                    )
+                    ->whereNotNull(
+                        'longitude'
+                    )
+                    ->get([
+                        'id',
+                        'latitude',
+                        'longitude',
+                    ]);
+
+
+            /*
+             * Area kosong tidak dijadikan kandidat.
+             */
+            if ($members->isEmpty()) {
+                continue;
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | CENTROID AREA
+            |--------------------------------------------------------------------------
+            */
+
+            $avgLatitude =
+                (float) $members->avg(
+                    'latitude'
+                );
+
+
+            $avgLongitude =
+                (float) $members->avg(
+                    'longitude'
+                );
+
+
+            $centroidDistance =
+                $this->haversineKm(
+                    $lat,
+                    $lng,
+                    $avgLatitude,
+                    $avgLongitude
+                );
+
+
+            /*
+             * Store terlalu jauh dari pusat Area.
+             */
             if (
-                ! $centroid ||
-                $centroid->avg_lat === null ||
-                $centroid->avg_lng === null
+                $centroidDistance
+                >
+                self::CENTROID_RADIUS_KM
             ) {
                 continue;
             }
 
-            $distance = $this->haversineKm(
-                $lat,
-                $lng,
-                (float) $centroid->avg_lat,
-                (float) $centroid->avg_lng
-            );
+
+            /*
+            |--------------------------------------------------------------------------
+            | JARAK KE SETIAP ANGGOTA
+            |--------------------------------------------------------------------------
+            */
+
+            $fitsAllMembers =
+                true;
+
+
+            foreach ($members as $member) {
+
+                $memberDistance =
+                    $this->haversineKm(
+                        $lat,
+                        $lng,
+                        (float) $member->latitude,
+                        (float) $member->longitude
+                    );
+
+
+                if (
+                    $memberDistance
+                    >
+                    self::MAX_MEMBER_DISTANCE_KM
+                ) {
+
+                    $fitsAllMembers =
+                        false;
+
+                    break;
+                }
+            }
+
+
+            if (! $fitsAllMembers) {
+                continue;
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | PILIH AREA TERDEKAT
+            |--------------------------------------------------------------------------
+            */
 
             if (
-                $distance <= self::RADIUS_KM &&
-                (
-                    $nearestDistance === null ||
-                    $distance < $nearestDistance
-                )
+                $nearestDistance === null
+                ||
+                $centroidDistance
+                <
+                $nearestDistance
             ) {
-                $nearestArea = $area;
-                $nearestDistance = $distance;
+
+                $nearestArea =
+                    $area;
+
+                $nearestDistance =
+                    $centroidDistance;
             }
         }
+
 
         return $nearestArea;
     }

@@ -9,14 +9,19 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('drivers', function (Blueprint $table) {
-            $table->string('phone', 20)->nullable()->change();
+            $table->unique(
+                'user_id',
+                'drivers_user_id_unique'
+            );
         });
     }
 
     public function down(): void
     {
         Schema::table('drivers', function (Blueprint $table) {
-            $table->string('phone', 20)->nullable(false)->change();
+            $table->dropUnique(
+                'drivers_user_id_unique'
+            );
         });
     }
 };

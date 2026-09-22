@@ -12,6 +12,7 @@ use Filament\Forms\Components\Hidden;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
+use Filament\Schemas\Components\View;
 
 class StoreForm
 {
@@ -20,19 +21,80 @@ class StoreForm
         return $schema->components([
             TextInput::make('name')->required(),
             TextInput::make('code')->required()->unique(ignoreRecord: true),
-            Textarea::make('address')->required()->columnSpanFull(),
+            Textarea::make('address')
+                ->label('Alamat')
+                ->required()
+                ->columnSpanFull()
+                ->extraInputAttributes([
+                    'id' =>
+                        'store-address',
+                ]),
 
             TextInput::make('latitude')
+                ->label('Latitude')
                 ->numeric()
                 ->required()
-                ->live(onBlur: true)
-                ->afterStateUpdated(fn (Get $get, Set $set) => self::refreshAreaPreview($get, $set)),
+                ->extraInputAttributes([
+                    'id' =>
+                        'store-latitude',
+                ])
+
+                ->live(
+                    onBlur: true
+                )
+
+                ->afterStateUpdated(
+                    fn (
+                        Get $get,
+                        Set $set
+                    ) =>
+                        self::refreshAreaPreview(
+                            $get,
+                            $set
+                        )
+                ),
 
             TextInput::make('longitude')
+                ->label('Longitude')
                 ->numeric()
                 ->required()
-                ->live(onBlur: true)
-                ->afterStateUpdated(fn (Get $get, Set $set) => self::refreshAreaPreview($get, $set)),
+                ->extraInputAttributes([
+                    'id' =>
+                        'store-longitude',
+                ])
+
+                ->live(
+                    onBlur: true
+                )
+
+                ->afterStateUpdated(
+                    fn (
+                        Get $get,
+                        Set $set
+                    ) =>
+                        self::refreshAreaPreview(
+                            $get,
+                            $set
+                        )
+                ),
+
+                View::make(
+                    'filament.schemas.components.location-picker'
+                )
+                    ->viewData([
+                        'addressInputId' =>
+                            'store-address',
+
+                        'latitudeInputId' =>
+                            'store-latitude',
+
+                        'longitudeInputId' =>
+                            'store-longitude',
+                    ])
+                    ->columnSpanFull(),
+    
+            Hidden::make('area_id')
+                ->dehydrated(),
 
             Placeholder::make('area_preview')
                 ->label('Area (otomatis)')
@@ -51,23 +113,68 @@ class StoreForm
         ]);
     }
 
-    protected static function refreshAreaPreview(Get $get, Set $set): void
-    {
-        $lat = $get('latitude');
-        $lng = $get('longitude');
+    protected static function refreshAreaPreview(
+        Get $get,
+        Set $set
+    ): void {
 
-        if (!$lat || !$lng) {
+        $latitude =
+            $get('latitude');
+
+        $longitude =
+            $get('longitude');
+
+
+        if (
+            $latitude === null
+            ||
+            $longitude === null
+            ||
+            $latitude === ''
+            ||
+            $longitude === ''
+        ) {
+
+            $set(
+                'area_preview_text',
+                'Isi latitude & longitude terlebih dahulu.'
+            );
+
             return;
         }
 
-        $preview = app(AreaAssignmentService::class)->preview((float) $lat, (float) $lng);
+        $preview =
+            app(
+                AreaAssignmentService::class
+            )->preview(
+                (float) $latitude,
+                (float) $longitude
+            );
 
-        if (!$preview['branch']) {
-            $set('area_preview_text', 'Tidak ditemukan cabang dengan koordinat valid');
+        if (
+            ! $preview['branch']
+        ) {
+
+            $set(
+                'area_preview_text',
+                'Cabang aktif tidak ditemukan.'
+            );
+
             return;
         }
 
-        $status = $preview['is_new'] ? 'area baru akan dibuat' : 'area sudah ada';
-        $set('area_preview_text', "{$preview['area_code']} ({$status}) — Cabang {$preview['branch']->name}");
+        $status =
+            $preview['is_new']
+                ? 'Area baru akan dibuat saat disimpan'
+                : 'Area existing';
+
+        $set(
+            'area_preview_text',
+
+            "{$preview['area_code']} "
+            . "({$status}) "
+            . "— Cabang "
+            . $preview['branch']->name
+        );
     }
 }

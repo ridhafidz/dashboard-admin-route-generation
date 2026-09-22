@@ -21,6 +21,7 @@ return new class extends Migration
             $table->string('init_cab', 10)->nullable()->unique();
             $table->decimal('latitude', 10, 7)->nullable();
             $table->decimal('longitude', 10, 7)->nullable();
+            $table->time('start_time')->nullable()->default('06:00');
             $table->enum('status', ['active', 'inactive']) ->default('active'); 
             $table->timestamps(); 
         });
@@ -31,6 +32,8 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('branches');
+        Schema::table('branches', function (Blueprint $table) {
+            $table->dropColumn('start_time');
+        });
     }
 };

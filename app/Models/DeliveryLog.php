@@ -20,6 +20,14 @@ class DeliveryLog extends Model
 
     protected $casts = [
         'recorded_at' => 'datetime',
+        'latitude' =>
+            'decimal:7',
+
+        'longitude' =>
+            'decimal:7',
+
+        'recorded_at' =>
+            'datetime',
     ];
 
     public function deliveryRoute()

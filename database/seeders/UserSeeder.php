@@ -35,7 +35,6 @@ class UserSeeder extends Seeder
         Driver::create([
             'user_id' => $driver1->id,
             'name' => $driver1->name,
-            'phone' => '081234567890',
             'status' => 'active',
         ]);
 
@@ -50,7 +49,6 @@ class UserSeeder extends Seeder
         Driver::create([
             'user_id' => $driver2->id,
             'name' => $driver2->name,
-            'phone' => '081298765432',
             'status' => 'active',
         ]);
     }

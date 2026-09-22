@@ -7,6 +7,7 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Schemas\Schema;
+use Filament\Schemas\Components\View;
 
 class BranchForm
 {
@@ -41,11 +42,42 @@ class BranchForm
             TextInput::make('longitude')
                 ->label('Longitude')
                 ->numeric()
-                ->required(),
+                ->required()
+                ->extraInputAttributes([
+                    'id' =>
+                        'branch-longitude',
+                ]),
 
             TextInput::make('latitude')
                 ->label('Latitude')
-                ->required(),
+                ->numeric()
+                ->required()
+                ->extraInputAttributes([
+                    'id' =>
+                        'branch-latitude',
+                ]),
+
+            View::make(
+                'filament.schemas.components.location-picker'
+            )
+            ->viewData([
+                /*
+                 * Branch belum memiliki field
+                 * address di database.
+                 *
+                 * Autocomplete hanya menjadi
+                * alat pencarian titik.
+                */
+                'addressInputId' =>
+                    null,
+
+                'latitudeInputId' =>
+                    'branch-latitude',
+
+                'longitudeInputId' =>
+                    'branch-longitude',
+                ])
+                ->columnSpanFull(),
 
             TextInput::make('region_id')
                 ->label('Region ID')

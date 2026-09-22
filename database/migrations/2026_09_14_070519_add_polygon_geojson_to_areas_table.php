@@ -8,17 +8,18 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('vehicle_types', function (Blueprint $table) {
-            $table->decimal('volume_m3', 10, 3)
+        Schema::table('areas', function (Blueprint $table) {
+            $table
+                ->longText('polygon_geojson')
                 ->nullable()
-                ->after('height_cm');
+                ->after('branch_id');
         });
     }
 
     public function down(): void
     {
-        Schema::table('vehicle_types', function (Blueprint $table) {
-            $table->dropColumn('volume_m3');
+        Schema::table('areas', function (Blueprint $table) {
+            $table->dropColumn('polygon_geojson');
         });
     }
 };

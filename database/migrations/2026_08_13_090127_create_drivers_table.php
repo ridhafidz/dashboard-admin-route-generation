@@ -17,10 +17,7 @@ return new class extends Migration
             $table->foreignId('branch_id')->nullable()->constrained()->nullOnDelete();
             $table->foreignId('user_id')->nullable()->constrained()->nullOnDelete();
             $table->string('name');
-            $table->string('employee_code')->unique()->nullable();
-            $table->string('phone')->nullable();
-            $table->time('shift_start_time')->nullable();
-            $table->time('shift_end_time')->nullable();
+            $table->string('phone', 20)->nullable()->change();
             $table->enum('status', ['inactive', 'active', 'ready', 'in_delivery'])->default('inactive');
             $table->timestamps();
         });
@@ -31,6 +28,8 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('drivers');
+        Schema::table('drivers', function (Blueprint $table) {
+            $table->string('phone', 20)->nullable(false)->change();
+        });
     }
 };

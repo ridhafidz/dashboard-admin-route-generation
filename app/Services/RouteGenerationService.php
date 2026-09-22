@@ -25,6 +25,8 @@ class RouteGenerationService
 {
     protected const DEFAULT_BRANCH_START_TIME = '08:00';
 
+    protected const DEFAULT_ROUTE_PREPARATION_MINUTES = 60;
+
     public function generateTodayRoutes(array $data): array
     {
         $branchId = (int) ($data['branch_id'] ?? 0);
@@ -53,6 +55,36 @@ class RouteGenerationService
             )
             ?? self::DEFAULT_BRANCH_START_TIME;
 
+        $now =
+            now();
+
+
+        $branchStartDateTime =
+            today()
+                ->setTimeFromTimeString(
+                    $branchStartTime
+                );
+
+
+        $planningBaseTime =
+            $now->greaterThan(
+                $branchStartDateTime
+            )
+                ? $now->copy()
+                : $branchStartDateTime->copy();
+
+
+        $deliveryStartDateTime =
+            $planningBaseTime
+                ->copy()
+                ->addMinutes(
+                    self::DEFAULT_ROUTE_PREPARATION_MINUTES
+                );
+
+
+        $deliveryStartTime =
+            $deliveryStartDateTime
+                ->format('H:i');
         /*
         |--------------------------------------------------------------------------
         | 1. SNAPSHOT DRIVER READY
@@ -783,7 +815,7 @@ class RouteGenerationService
                                 $branch->longitude,
 
                             'start_time' =>
-                                $branchStartTime,
+                                $deliveryStartTime,
                         ],
 
                         /*
@@ -967,7 +999,7 @@ class RouteGenerationService
             DB::transaction(
                 function () use (
                     $branchId,
-                    $branchStartTime,
+                    $deliveryStartTime,
                     $clusters,
                     $packageIdsSnapshot,
                     $driverIdsSnapshot,
@@ -1677,7 +1709,7 @@ class RouteGenerationService
                         $predictedDuration =
                             $this
                                 ->minutesBetween(
-                                    $branchStartTime,
+                                    $deliveryStartTime,
                                     $lastStop[
                                         'service_end'
                                     ]
@@ -2014,6 +2046,32 @@ class RouteGenerationService
         return [
             'branch_id' =>
                 $branchId,
+
+            /*
+            |--------------------------------------------------------------------------
+            | ROUTE PLANNING TIME
+            |--------------------------------------------------------------------------
+            */
+
+            'branch_start_time' =>
+                $branchStartTime,
+
+            'generated_at' =>
+                $now->format(
+                    'Y-m-d H:i:s'
+                ),
+
+            'preparation_minutes' =>
+                self::DEFAULT_ROUTE_PREPARATION_MINUTES,
+
+            'delivery_start_time' =>
+                $deliveryStartTime,
+
+            /*
+            |--------------------------------------------------------------------------
+            | SUMMARY
+            |--------------------------------------------------------------------------
+            */
 
             'demand_count' =>
                 $demandsPayload->count(),

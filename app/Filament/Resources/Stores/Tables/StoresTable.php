@@ -12,7 +12,12 @@ class StoresTable
         return $table->columns([
             TextColumn::make('name')->searchable(),
             TextColumn::make('code')->searchable(),
-            TextColumn::make('area.name')->label('Area'),
+            TextColumn::make('area.code')
+                ->label('Area')
+                ->placeholder('-')
+                ->badge()
+                ->searchable()
+                ->sortable(),
             TextColumn::make('address')->limit(40),
             TextColumn::make('opening_time')->label('Jam Buka'),
             TextColumn::make('closing_time')->label('Jam Tutup'),

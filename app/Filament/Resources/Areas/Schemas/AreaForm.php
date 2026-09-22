@@ -7,13 +7,19 @@ use Filament\Schemas\Schema;
 
 class AreaForm
 {
-    public static function configure(Schema $schema): Schema
-    {
-        return $schema->components([
-            TextInput::make('code')
-                ->label('Kode Area')
-                ->required()
-                ->unique(ignoreRecord: true),
-        ]);
+    public static function configure(
+        Schema $schema
+    ): Schema {
+        return $schema
+            ->components([
+
+                TextInput::make('code')
+                    ->label('Kode Area')
+                    ->required()
+                    ->unique(
+                        ignoreRecord: true
+                    ),
+
+            ]);
     }
 }

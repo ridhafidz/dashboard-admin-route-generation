@@ -20,6 +20,12 @@ return new class extends Migration
             $table->text('address');
             $table->decimal('latitude', 10, 7);
             $table->decimal('longitude', 10, 7);
+            $table->time('opening_time')
+                ->nullable();
+            $table->time('closing_time')
+                ->nullable();
+            $table->unsignedSmallInteger('service_duration_minutes')
+                ->nullable();
             $table->timestamps();
             $table->index(['latitude', 'longitude']);
         });
@@ -30,6 +36,12 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('stores');
+        Schema::table('stores', function (Blueprint $table) {
+            $table->dropColumn('service_duration_minutes');
+            $table->dropColumn([
+                'opening_time',
+                'closing_time',
+            ]);
+        });
     }
 };

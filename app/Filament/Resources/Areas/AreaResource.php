@@ -7,6 +7,7 @@ use App\Filament\Resources\Areas\Pages\EditArea;
 use App\Filament\Resources\Areas\Pages\ListAreas;
 use App\Filament\Resources\Areas\Schemas\AreaForm;
 use App\Filament\Resources\Areas\Tables\AreasTable;
+use App\Filament\Resources\Areas\Pages\ViewArea;
 use App\Models\Area;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -49,6 +50,7 @@ class AreaResource extends Resource
             'index' => ListAreas::route('/'),
             'create' => CreateArea::route('/create'),
             'edit' => EditArea::route('/{record}/edit'),
+            'view' => ViewArea::route('/{record}'),
         ];
     }
 

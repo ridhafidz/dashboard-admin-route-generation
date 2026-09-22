@@ -58,16 +58,22 @@ class DeliveryRouteResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
-        $query = parent::getEloquentQuery()
-            ->with([
-                'branch',
-                'driver',
-                'vehicle.vehicleType',
-            ]);
+        $query =
+            parent::getEloquentQuery()
+                ->with([
+                    'branch:id,init_cab,name',
 
-        $branchId = app(
-            BranchContext::class
-        )->getId();
+                    'driver:id,name',
+
+                    'vehicle:id,vehicle_type_id,plate_number',
+
+                    'vehicle.vehicleType:id,category,box_type',
+                ]);
+
+        $branchId =
+            app(
+                BranchContext::class
+            )->getId();
 
         if ($branchId) {
             $query->where(
@@ -78,7 +84,6 @@ class DeliveryRouteResource extends Resource
 
         return $query;
     }
-
     /*
      * Route dibuat oleh optimizer.
      *

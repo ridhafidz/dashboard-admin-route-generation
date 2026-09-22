@@ -16,6 +16,9 @@ class DeliveryRoute extends Model
         'area_id',
         'route_date',
         'status',
+        'approval_status',
+        'approved_at',
+        'approved_by',
         'predicted_duration_minutes',
         'predicted_cost',
         'predicted_package_count',
@@ -27,10 +30,11 @@ class DeliveryRoute extends Model
     ];
 
     protected $casts = [
-        'route_date' => 'date',
-        'started_at' => 'datetime',
+        'route_date'   => 'date',
+        'started_at'   => 'datetime',
         'completed_at' => 'datetime',
-        'status' => \App\Enums\RouteStatus::class,
+        'approved_at'  => 'datetime',
+        'status'       => \App\Enums\RouteStatus::class,
     ];
 
     public function branch()
