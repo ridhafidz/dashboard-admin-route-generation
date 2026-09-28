@@ -322,23 +322,207 @@ class ListDeliveryRoutes extends ListRecords
                                 );
 
 
-                            Notification::make()
+                            $routeCount =
+                                (int) (
+                                    $result['route_count']
+                                    ?? 0
+                                );
 
-                                ->title(
-                                    'Berhasil Generate Route'
-                                )
 
-                                ->body(
-                                    "Berhasil membuat "
-                                    . "{$result['route_count']} route, "
-                                    . "{$result['package_count']} package, "
-                                    . "dan {$result['demand_count']} delivery demand."
-                                )
+                            $packageCount =
+                                (int) (
+                                    $result['package_count']
+                                    ?? 0
+                                );
 
-                                ->success()
 
-                                ->send();
+                            $demandCount =
+                                (int) (
+                                    $result['demand_count']
+                                    ?? 0
+                                );
 
+
+                            $deferredDemands =
+                                collect(
+                                    $result['deferred_demands']
+                                    ?? []
+                                );
+
+
+                            $deferredCount =
+                                $deferredDemands
+                                    ->count();
+
+
+                            /*
+                             * SEMUA DEMAND BERHASIL
+                             */
+                            if (
+                                $routeCount > 0
+                                &&
+                                $deferredCount === 0
+                            ) {
+
+                                Notification::make()
+
+                                    ->title(
+                                        'Generate Route Berhasil'
+                                    )
+
+                                    ->body(
+                                        "Berhasil membuat "
+                                        . "{$routeCount} route, "
+                                        . "{$packageCount} package, "
+                                        . "dan {$demandCount} delivery demand. "
+                                        . "Seluruh demand berhasil dialokasikan."
+                                    )
+
+                                    ->success()
+
+                                    ->send();
+
+
+                                /*
+                            /*
+                             * PARTIAL / ADA DEMAND TERTUNDA
+                             */
+                            } elseif (
+                                $routeCount > 0
+                                &&
+                                $deferredCount > 0
+                            ) {
+
+                                $reasonGroups =
+                                    $deferredDemands
+                                        ->groupBy(
+                                            fn (array $item) =>
+                                                (
+                                                    $item['reason']
+                                                    ?? 'unknown'
+                                                )
+                                                . '|'
+                                                . (
+                                                    $item['box_type']
+                                                    ?? 'unknown'
+                                                )
+                                        );
+
+                                $messages = [];
+
+                                foreach (
+                                    $reasonGroups
+                                    as $key => $items
+                                ) {
+
+                                    [
+                                        $reason,
+                                        $boxType,
+                                    ] = array_pad(
+                                        explode(
+                                            '|',
+                                            $key,
+                                            2
+                                        ),
+                                        2,
+                                        'unknown'
+                                    );
+
+                                    $count =
+                                        $items->count();
+
+
+                                    $boxLabel =
+                                        match ($boxType) {
+                                            'dry' =>
+                                                'Dry',
+
+                                            'cold_storage' =>
+                                                'Cold Storage',
+
+                                            default =>
+                                                ucfirst(
+                                                    str_replace(
+                                                        '_',
+                                                        ' ',
+                                                        $boxType
+                                                    )
+                                                ),
+                                        };
+
+                                    $message =
+                                        match ($reason) {
+                                            'insufficient_compatible_vehicle' =>
+                                                "{$count} demand {$boxLabel} "
+                                                . "tertunda karena kendaraan "
+                                                . "{$boxLabel} yang tersedia "
+                                                . "tidak mencukupi.",
+
+                                            'insufficient_route_slots' =>
+                                                "{$count} demand {$boxLabel} "
+                                                . "tertunda karena jumlah "
+                                                . "Driver Ready tidak mencukupi.",
+
+                                            default =>
+                                                "{$count} demand {$boxLabel} "
+                                                . "belum dapat dibuatkan route.",
+                                        };
+
+                                    $messages[] =
+                                        $message;
+                                }
+
+                                Notification::make()
+
+                                    ->title(
+                                        'Route Dibuat Sebagian'
+                                    )
+
+                                    ->body(
+                                        "Berhasil membuat "
+                                        . "{$routeCount} route. "
+                                        . "{$deferredCount} delivery demand "
+                                        . "belum dapat dibuatkan route. "
+                                        . implode(
+                                            ' ',
+                                            $messages
+                                        )
+                                    )
+
+                                    ->warning()
+
+                                    ->persistent()
+
+                                    ->send();
+
+
+                                /*
+                                /*
+                                |--------------------------------------------------------------------------
+                                | TIDAK ADA ROUTE YANG BISA DIBUAT
+                                |--------------------------------------------------------------------------
+                                */
+
+                            } else {
+
+                                Notification::make()
+
+                                    ->title(
+                                        'Route Belum Dapat Dibuat'
+                                    )
+
+                                    ->body(
+                                        "Tidak ada route yang dapat dibuat. "
+                                        . "Periksa ketersediaan Driver Ready "
+                                        . "dan kendaraan sesuai box type."
+                                    )
+
+                                    ->danger()
+
+                                    ->persistent()
+
+                                    ->send();
+                            }
 
                             /*
                              * Refresh tabel Delivery Routes

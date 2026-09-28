@@ -839,89 +839,217 @@ class RouteGenerationService
                     ]
                 );
 
-        if ($response->failed()) {
-            throw new RuntimeException(
-                'ML service gagal: '
-                . (
+                if ($response->failed()) {
+
+                    throw new RuntimeException(
+                        'ML service gagal: '
+                        . (
+                            $response->json(
+                                'detail'
+                            )
+                            ?? $response->body()
+                        )
+                    );
+                }
+
+                $clusters =
                     $response->json(
-                        'detail'
-                    )
-                    ?? $response->body()
-                )
-            );
-        }
+                        'clusters',
+                        []
+                    );
 
-        $clusters =
-            $response->json(
-                'clusters'
-            );
+                $deferredDemands =
+                    $response->json(
+                        'deferred_demands',
+                        []
+                    );
 
-        if (
-            ! is_array($clusters)
-            || empty($clusters)
-        ) {
-            throw new RuntimeException(
-                'ML service tidak mengembalikan hasil cluster.'
-            );
-        }
+                if (! is_array($clusters)) {
 
-        /*
-         * Jumlah cluster tidak boleh melebihi driver.
-         */
-        if (
-            count($clusters)
-            > $readyDrivers->count()
-        ) {
-            throw new RuntimeException(
-                'Optimizer menghasilkan route lebih '
-                . 'banyak daripada jumlah driver Ready.'
-            );
-        }
+                    throw new RuntimeException(
+                        'Format clusters dari ML service tidak valid.'
+                    );
+                }
 
-        /*
-         * Ambil vehicle pilihan Python.
-         */
-        $selectedVehicleUuids =
-            collect($clusters)
-                ->map(
-                    fn (
-                        array $cluster
-                    ) =>
-                        $cluster[
-                            'vehicle_id'
-                        ]
-                        ?? null
-                )
-                ->filter()
-                ->values();
+                if (! is_array($deferredDemands)) {
 
-        if (
-            $selectedVehicleUuids->count()
-            !== count($clusters)
-        ) {
-            throw new RuntimeException(
-                'ML service tidak mengembalikan '
-                . 'vehicle_id pada seluruh cluster.'
-            );
-        }
+                    $deferredDemands = [];
+                }
 
-        /*
-         * Satu vehicle hanya boleh digunakan
-         * satu route.
-         */
-        if (
-            $selectedVehicleUuids
-                ->unique()
-                ->count()
-            !==
-            $selectedVehicleUuids
-                ->count()
-        ) {
-            throw new RuntimeException(
-                'ML service menggunakan kendaraan '
-                . 'yang sama pada lebih dari satu cluster.'
-            );
-        }
+                /*
+                |--------------------------------------------------------------------------
+                | RESOURCE TIDAK MENCUKUPI
+                |--------------------------------------------------------------------------
+                |
+                | Python sudah menentukan bahwa ada demand yang tidak bisa
+                | dilayani hari ini.
+                |
+                | Karena policy kita ALL-OR-NOTHING:
+                |
+                | - jangan masuk transaction
+                | - jangan membuat route sebagian
+                | - tampilkan alasan yang jelas ke admin
+                |
+                */
+
+                if (! empty($deferredDemands)) {
+
+                    $reasonGroups =
+                        collect(
+                            $deferredDemands
+                        )
+                            ->groupBy(
+                                function (
+                                    array $item
+                                ): string {
+
+                                    return
+                                        (
+                                            $item['reason']
+                                            ?? 'unknown'
+                                        )
+                                        . '|'
+                                        . (
+                                            $item['box_type']
+                                            ?? 'unknown'
+                                        );
+                                }
+                            );
+
+                    $messages = [];
+
+                    foreach (
+                        $reasonGroups
+                        as $key => $items
+                    ) {
+
+                        [
+                            $reason,
+                            $boxType,
+                        ] = array_pad(
+                            explode(
+                                '|',
+                                $key,
+                                2
+                            ),
+                            2,
+                            'unknown'
+                        );
+
+                        $count =
+                            $items->count();
+
+                        $boxLabel =
+                            match ($boxType) {
+
+                                'dry' =>
+                                    'Dry',
+
+                                'cold_storage' =>
+                                    'Cold Storage',
+
+                                default =>
+                                    ucfirst(
+                                        str_replace(
+                                            '_',
+                                            ' ',
+                                            $boxType
+                                        )
+                                    ),
+                            };
+
+                        $messages[] =
+                            match ($reason) {
+
+                                'insufficient_compatible_vehicle' =>
+                                    "{$count} delivery demand {$boxLabel} "
+                                    . "belum dapat dibuatkan route karena "
+                                    . "kendaraan {$boxLabel} yang tersedia "
+                                    . "tidak mencukupi.",
+
+
+                                'insufficient_route_slots' =>
+                                    "{$count} delivery demand {$boxLabel} "
+                                    . "belum dapat dibuatkan route karena "
+                                    . "jumlah Driver Ready tidak mencukupi.",
+
+
+                                default =>
+                                    "{$count} delivery demand {$boxLabel} "
+                                    . "belum dapat dialokasikan ke route.",
+                            };
+                    }
+
+                    throw new RuntimeException(
+                        'Resource pengiriman tidak mencukupi. '
+                        . implode(
+                            ' ',
+                            $messages
+                        )
+                    );
+                }
+
+                if (empty($clusters)) {
+
+                    throw new RuntimeException(
+                        'ML service tidak mengembalikan hasil cluster.'
+                    );
+                }
+
+                /*
+                 * Jumlah cluster tidak boleh melebihi driver.
+                 */
+                if (
+                    count($clusters)
+                    > $readyDrivers->count()
+                ) {
+                    throw new RuntimeException(
+                        'Optimizer menghasilkan route lebih '
+                        . 'banyak daripada jumlah driver Ready.'
+                    );
+                }
+
+                /*
+                 * Ambil vehicle pilihan Python.
+                 */
+                $selectedVehicleUuids =
+                    collect($clusters)
+                        ->map(
+                            fn (
+                                array $cluster
+                            ) =>
+                                $cluster['vehicle_id'] ?? null
+                        )
+                        ->filter()
+                        ->values();
+
+                if (
+                    $selectedVehicleUuids->count()
+                    !== count($clusters)
+                ) {
+                    throw new RuntimeException(
+                        'ML service tidak mengembalikan '
+                        . 'vehicle_id pada seluruh cluster.'
+                    );
+                }
+
+                /*
+                 * Satu vehicle hanya boleh digunakan
+                 * satu route.
+                 */
+                if (
+                    $selectedVehicleUuids
+                        ->unique()
+                        ->count()
+                    !==
+                    $selectedVehicleUuids
+                        ->count()
+                ) {
+                    throw new RuntimeException(
+                        'ML service menggunakan kendaraan '
+                        . 'yang sama pada lebih dari satu cluster.'
+                    );
+                }
 
         $availableVehicleByUuid =
             $availableVehicles
@@ -2120,6 +2248,12 @@ class RouteGenerationService
 
             'clusters' =>
                 $clusters,
+            
+            'deferred_demands' =>
+                $response->json(
+                    'deferred_demands',
+                    []
+                ),
         ];
     }
 
