@@ -36,7 +36,11 @@ return [
     ],
 
     'ml' => [
-        'url' => env('ML_SERVICE_URL', 'http://127.0.0.1:8001'),
+        'url' => env('ML_SERVICE_URL', 'http://[IP_ADDRESS]'),
+    ],
+
+    'osrm' => [
+        'url' => env('OSRM_URL', 'http://[IP_ADDRESS]'),
     ],
 
     'google_maps' => [

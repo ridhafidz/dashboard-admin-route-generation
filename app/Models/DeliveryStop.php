@@ -12,6 +12,8 @@ class DeliveryStop extends Model
     protected $fillable = [
         'delivery_route_id',
         'store_id',
+        'source_customer_code',
+        'source_so_numbers',
         'sequence_order',
         'predicted_arrival_time',
         'predicted_service_start_time',
@@ -24,6 +26,7 @@ class DeliveryStop extends Model
     ];
 
     protected $casts = [
+        'source_so_numbers' => 'array',
         'predicted_arrival_time' => 'datetime',
         'predicted_service_start_time' => 'datetime',
         'predicted_service_end_time' => 'datetime',

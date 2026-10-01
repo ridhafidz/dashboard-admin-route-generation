@@ -3,32 +3,50 @@
 namespace App\Services;
 
 use App\Enums\DriverStatus;
-use App\Enums\OrderStatus;
-use App\Enums\PackageStatus;
 use App\Enums\RouteStatus;
 use App\Enums\VehicleStatus;
 use App\Models\Branch;
 use App\Models\DeliveryRoute;
 use App\Models\DeliveryStop;
 use App\Models\Driver;
-use App\Models\Order;
-use App\Models\Package;
+use App\Models\Store;
 use App\Models\Vehicle;
 use BackedEnum;
+use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 use RuntimeException;
 
 class RouteGenerationService
 {
     protected const DEFAULT_BRANCH_START_TIME = '08:00';
-
     protected const DEFAULT_ROUTE_PREPARATION_MINUTES = 60;
 
+    public function __construct(
+        protected DeliverySourceService $deliverySource
+    ) {
+    }
+
+    /**
+     * Route Generation V3
+     *
+     * Source of truth:
+     * - so_sda
+     * - cust_sda
+     *
+     * Tidak lagi memakai Order / Package / Product sebagai sumber optimizer.
+     * Tabel stores hanya dipakai sebagai mirror customer agar relasi
+     * DeliveryStop existing tetap kompatibel.
+     */
     public function generateTodayRoutes(array $data): array
     {
+        set_time_limit(300);
+        /*
+         * Nama method dipertahankan untuk compatibility UI lama.
+         * Secara bisnis method ini sekarang dapat membuat route H+2 dari source_date,
+         * sehingga route_date tidak harus sama dengan hari saat tombol ditekan.
+         */
         $branchId = (int) ($data['branch_id'] ?? 0);
 
         if ($branchId <= 0) {
@@ -49,743 +67,216 @@ class RouteGenerationService
             );
         }
 
+        /*
+         * PREP INTEGRASI SISTEM UTAMA - MAPPING CABANG
+         * Saat ini Branch.cab_id adalah kode cabang yang dipakai source SO.
+         * Jika kode cabang sistem utama berbeda, gunakan mapping resmi di master
+         * branch / tabel mapping, bukan if/else yang tersebar di service.
+         */
+        if (trim((string) ($branch->cab_id ?? '')) === '') {
+            throw new RuntimeException(
+                'Cabang ini belum memiliki CAB ID sumber data.'
+            );
+        }
+
+        $sourceDate = $this->resolveSourceDate(
+            $data['source_date'] ?? null
+        );
+
+        /*
+        |------------------------------------------------------------------
+        | ATURAN BISNIS TANGGAL ROUTE
+        |------------------------------------------------------------------
+        |
+        | visit_date / source_date = tanggal Sales Order masuk.
+        | route_date               = source_date + 2 hari kalender.
+        |
+        | Contoh:
+        | source_date = 2026-09-07
+        | route_date  = 2026-09-09
+        |
+        | PREP INTEGRASI SISTEM UTAMA:
+        | Jika aturan H+2 berubah menjadi hari kerja, ubah hanya method
+        | calculateRouteDate(). Jangan sebarkan perhitungan tanggal ke query lain.
+        |
+        */
+        $routeDate = $this->calculateRouteDate($sourceDate);
+
+        /*
+         * Jika UI mengirim route_date, validasi agar tidak bisa menyimpang
+         * dari aturan H+2 yang menjadi source of truth di service ini.
+         */
+        if (
+            isset($data['route_date'])
+            && trim((string) $data['route_date']) !== ''
+        ) {
+            $requestedRouteDate = $this->resolveRouteDate(
+                $data['route_date']
+            );
+
+            if ($requestedRouteDate !== $routeDate) {
+                throw new RuntimeException(
+                    "Route date harus H+2 dari tanggal SO masuk. "
+                    . "Expected {$routeDate}, received {$requestedRouteDate}."
+                );
+            }
+        }
+
+        /*
+         * Karena source SO belum memiliki status assigned di aplikasi ini,
+         * jangan generate dua kali untuk branch + route date yang sama.
+         */
+        $this->assertNoExistingRoutes(
+            branchId: $branchId,
+            routeDate: $routeDate,
+        );
+
         $branchStartTime =
             $this->normalizeTime(
                 $branch->start_time
             )
             ?? self::DEFAULT_BRANCH_START_TIME;
 
-        $now =
-            now();
+        [
+            'generated_at' => $generatedAt,
+            'delivery_start_time' => $deliveryStartTime,
+        ] = $this->resolvePlanningTime(
+            routeDate: $routeDate,
+            branchStartTime: $branchStartTime,
+        );
 
-
-        $branchStartDateTime =
-            today()
-                ->setTimeFromTimeString(
-                    $branchStartTime
-                );
-
-
-        $planningBaseTime =
-            $now->greaterThan(
-                $branchStartDateTime
-            )
-                ? $now->copy()
-                : $branchStartDateTime->copy();
-
-
-        $deliveryStartDateTime =
-            $planningBaseTime
-                ->copy()
-                ->addMinutes(
-                    self::DEFAULT_ROUTE_PREPARATION_MINUTES
-                );
-
-
-        $deliveryStartTime =
-            $deliveryStartDateTime
-                ->format('H:i');
         /*
         |--------------------------------------------------------------------------
-        | 1. SNAPSHOT DRIVER READY
+        | 1. DRIVER READY
         |--------------------------------------------------------------------------
-        |
-        | Driver TIDAK lagi dipasangkan dengan vehicle
-        | sebelum optimasi.
-        |
-        | Python memilih vehicle berdasarkan:
-        | - box type
-        | - volume
-        | - cluster
-        |
-        | Laravel baru memasangkan driver setelah
-        | hasil optimizer diterima.
-        |
         */
 
         $usedDriverIds = DeliveryRoute::query()
-            ->whereDate(
-                'route_date',
-                today()
-            )
-            ->where(
-                'status',
-                '!=',
-                RouteStatus::Cancelled->value
-            )
+            ->whereDate('route_date', $routeDate)
+            ->where('status', '!=', RouteStatus::Cancelled->value)
             ->pluck('driver_id');
 
         $readyDrivers = Driver::query()
-            ->where(
-                'branch_id',
-                $branchId
-            )
-            ->where(
-                'status',
-                DriverStatus::Ready
-            )
-            ->whereNotIn(
-                'id',
-                $usedDriverIds
-            )
+            ->where('branch_id', $branchId)
+            ->where('status', DriverStatus::Ready)
+            ->whereNotIn('id', $usedDriverIds)
             ->orderBy('id')
             ->get();
 
         if ($readyDrivers->isEmpty()) {
             throw new RuntimeException(
-                'Tidak ada driver Ready yang belum '
-                . 'memiliki route hari ini pada cabang '
-                . 'yang dipilih.'
+                'Tidak ada driver Ready yang tersedia pada cabang yang dipilih.'
             );
         }
 
         /*
         |--------------------------------------------------------------------------
-        | 2. SNAPSHOT SEMUA VEHICLE ACTIVE
+        | 2. VEHICLE ACTIVE
         |--------------------------------------------------------------------------
         |
-        | Tidak lagi:
-        |
-        | min(driver, vehicle)
-        | lalu pairing satu-satu.
-        |
-        | Semua kendaraan yang tersedia dikirim ke Python.
-        |
+        | Tidak lagi membutuhkan box_type / volume_m3.
+        | Vehicle adalah resource satu-per-route.
         */
 
         $usedVehicleIds = DeliveryRoute::query()
-            ->whereDate(
-                'route_date',
-                today()
-            )
-            ->where(
-                'status',
-                '!=',
-                RouteStatus::Cancelled->value
-            )
+            ->whereDate('route_date', $routeDate)
+            ->where('status', '!=', RouteStatus::Cancelled->value)
             ->pluck('vehicle_id');
 
-        $availableVehicles =
-            Vehicle::query()
-                ->with('vehicleType')
-                ->where(
-                    'branch_id',
-                    $branchId
-                )
-                ->where(
-                    'status',
-                    VehicleStatus::Active
-                )
-                ->whereNotIn(
-                    'id',
-                    $usedVehicleIds
-                )
-                ->orderBy('id')
-                ->get();
-
-        if ($availableVehicles->isEmpty()) {
-            throw new RuntimeException(
-                'Tidak ada kendaraan Active yang '
-                . 'belum memiliki route hari ini '
-                . 'pada cabang yang dipilih.'
-            );
-        }
-
-        /*
-         * Pastikan semua vehicle mempunyai:
-         *
-         * - vehicle type
-         * - box type
-         * - volume > 0
-         */
-
-        $invalidVehicle =
-            $availableVehicles->first(
-                function (
-                    Vehicle $vehicle
-                ): bool {
-                    $vehicleType =
-                        $vehicle->vehicleType;
-
-                    return ! $vehicleType
-                        || ! $this->enumValue(
-                            $vehicleType->box_type
-                        )
-                        || (float) (
-                            $vehicleType->volume_m3
-                            ?? 0
-                        ) <= 0;
-                }
-            );
-
-        if ($invalidVehicle) {
-            throw new RuntimeException(
-                "Vehicle {$invalidVehicle->plate_number} "
-                . 'belum memiliki box type atau volume '
-                . 'kapasitas yang valid. Lengkapi dimensi '
-                . 'dan tipe box kendaraan terlebih dahulu.'
-            );
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | 3. SNAPSHOT SALES ORDER HARI INI
-        |--------------------------------------------------------------------------
-        |
-        | orders
-        |     = Header Sales Order
-        |
-        | packages
-        |     = Detail produk Sales Order
-        |
-        | scheduled_date dari ORDERS menjadi sumber utama.
-        |
-        */
-
-        $packages = Package::query()
-            ->with([
-                'product',
-                'order.store.area',
-            ])
-            ->where(
-                'status',
-                PackageStatus::Pending->value
-            )
-            ->whereHas(
-                'order',
-                function ($query): void {
-                    $query
-                        ->whereDate(
-                            'scheduled_date',
-                            today()
-                        )
-                        ->where(
-                            'status',
-                            OrderStatus::Pending->value
-                        );
-                }
-            )
-            ->whereHas(
-                'order.store.area',
-                function ($query) use ($branchId): void {
-                    $query->where(
-                        'branch_id',
-                        $branchId
-                    );
-                }
-            )
-            ->orderBy('order_id')
+        $availableVehicles = Vehicle::query()
+            ->with('vehicleType')
+            ->where('branch_id', $branchId)
+            ->where('status', VehicleStatus::Active)
+            ->whereNotIn('id', $usedVehicleIds)
             ->orderBy('id')
             ->get();
 
-        if ($packages->isEmpty()) {
-
-            $pendingOrdersToday = Order::query()
-                ->whereDate(
-                    'scheduled_date',
-                    today()
-                )
-                ->where(
-                    'status',
-                    OrderStatus::Pending->value
-                )
-                ->count();
-
-            $pendingPackagesToday = Package::query()
-                ->where(
-                    'status',
-                    PackageStatus::Pending->value
-                )
-                ->whereHas(
-                    'order',
-                    fn($query) =>
-                    $query->whereDate(
-                        'scheduled_date',
-                        today()
-                    )
-                )
-                ->count();
-
-            $branchPendingPackages = Package::query()
-                ->where(
-                    'status',
-                    PackageStatus::Pending->value
-                )
-                ->whereHas(
-                    'order.store.area',
-                    fn ($query) =>
-                    $query->where(
-                        'branch_id',
-                        $branchId
-                    )
-                )
-                ->count();
-
+        if ($availableVehicles->isEmpty()) {
             throw new RuntimeException(
-                'Tidak ada Sales Order yang eligible untuk routing. '
-                . "Pending Order hari ini: {$pendingOrdersToday}. "
-                . "Pending Package hari ini: {$pendingPackagesToday}. "
-                . "Pending Package cabang ini: {$branchPendingPackages}. "
-                . 'Pastikan tanggal kirim, status order, status item, '
-                . 'dan cabang toko sudah sesuai.'
+                'Tidak ada kendaraan Active yang tersedia pada cabang yang dipilih.'
             );
         }
 
-        /*
-         * Sales Order baru wajib memiliki:
-         *
-         * product_id
-         * box_type
-         * volume_m3
-         */
-
-        $invalidPackage =
-            $packages->first(
-                function (
-                    Package $package
-                ): bool {
-                    return ! $package->product_id
-                        || ! $this->enumValue(
-                            $package->box_type
-                        )
-                        || (float) (
-                            $package->volume_m3
-                            ?? 0
-                        ) <= 0;
-                }
-            );
-
-        if ($invalidPackage) {
-            throw new RuntimeException(
-                "Package {$invalidPackage->tracking_number} "
-                . 'belum memiliki product, box type, '
-                . 'atau volume yang valid. '
-                . 'Periksa kembali detail Sales Order.'
-            );
-        }
-
-        /*
-         * Validasi koordinat tujuan.
-         *
-         * Prioritas:
-         *
-         * Order snapshot
-         * ↓
-         * Store master
-         */
-
-        $invalidDestination =
-            $packages->first(
-                function (
-                    Package $package
-                ): bool {
-                    $order =
-                        $package->order;
-
-                    $store =
-                        $order?->store;
-
-                    if (
-                        ! $order
-                        || ! $store
-                    ) {
-                        return true;
-                    }
-
-                    $latitude =
-                        $order->delivery_latitude
-                        ?? $store->latitude;
-
-                    $longitude =
-                        $order->delivery_longitude
-                        ?? $store->longitude;
-
-                    return $latitude === null
-                        || $longitude === null;
-                }
-            );
-
-        if ($invalidDestination) {
-            $storeName =
-                $invalidDestination
-                    ->order
-                    ?->store
-                    ?->name
-                ?? '(store tidak ditemukan)';
-
-            throw new RuntimeException(
-                "Tujuan {$storeName} belum memiliki "
-                . 'koordinat pengiriman yang valid.'
-            );
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | 4. BENTUK DELIVERY DEMAND
-        |--------------------------------------------------------------------------
-        |
-        | Dasar demand:
-        |
-        | STORE + BOX TYPE
-        |
-        | Contoh:
-        |
-        | TOKO A
-        | ├── Mayasi Dry
-        | └── Kenji Dry
-        |
-        | menjadi:
-        |
-        | TOKO A::dry
-        |
-        |
-        | Kalau:
-        |
-        | TOKO A
-        | ├── Mayasi Dry
-        | └── Frozen Food Cold
-        |
-        | menjadi:
-        |
-        | TOKO A::dry
-        | TOKO A::cold_storage
-        |
-        */
-
-        $packagesByDemandId =
-            $packages->groupBy(
-                fn (
-                    Package $package
-                ): string =>
-                    $this->demandIdForPackage(
-                        $package
-                    )
-            );
-
-        $demandsPayload =
-            $packagesByDemandId
-                ->map(
-                    function (
-                        Collection $demandPackages,
-                        string $demandId
-                    ): array {
-                        /** @var Package $firstPackage */
-                        $firstPackage =
-                            $demandPackages->first();
-
-                        $order =
-                            $firstPackage->order;
-
-                        $store =
-                            $order->store;
-
-                        $boxType =
-                            $this->enumValue(
-                                $firstPackage->box_type
-                            );
-
-                        $latitude =
-                            $order->delivery_latitude
-                            ?? $store->latitude;
-
-                        $longitude =
-                            $order->delivery_longitude
-                            ?? $store->longitude;
-
-                        $address =
-                            $order->delivery_address
-                            ?: $store->address;
-
-                        return [
-
-                            /*
-                             * ID temporary demand.
-                             *
-                             * Tidak membutuhkan table baru.
-                             */
-                            'id' => $demandId,
-
-                            /*
-                             * Store.
-                             */
-                            'store_id' =>
-                                $store->uuid,
-
-                            'store_name' =>
-                                $store->name,
-
-                            'address' =>
-                                $address,
-
-                            'latitude' =>
-                                (float) $latitude,
-
-                            'longitude' =>
-                                (float) $longitude,
-
-                            /*
-                             * Constraint utama jenis box.
-                             */
-                            'box_type' =>
-                                $boxType,
-
-                            /*
-                             * Berat hanya informasi.
-                             *
-                             * TIDAK menjadi constraint vehicle.
-                             */
-                            'total_weight_kg' =>
-                                round(
-                                    (float)
-                                    $demandPackages
-                                        ->sum(
-                                            fn (
-                                                Package $package
-                                            ): float =>
-                                                (float)
-                                                $package
-                                                    ->weight_kg
-                                        ),
-                                    4
-                                ),
-
-                            /*
-                             * Volume adalah constraint vehicle.
-                             */
-                            'total_volume_m3' =>
-                                round(
-                                    (float)
-                                    $demandPackages
-                                        ->sum(
-                                            fn (
-                                                Package $package
-                                            ): float =>
-                                                (float)
-                                                $package
-                                                    ->volume_m3
-                                        ),
-                                    6
-                                ),
-
-                            /*
-                             * Time Window.
-                             */
-                            'opening_time' =>
-                                $this->normalizeTime(
-                                    $store->opening_time
-                                ),
-
-                            'closing_time' =>
-                                $this->normalizeTime(
-                                    $store->closing_time
-                                ),
-
-                            'service_duration_minutes' =>
-                                (int) (
-                                    $store
-                                        ->service_duration_minutes
-                                    ?? 15
-                                ),
-
-                            /*
-                             * Package yang merupakan bagian
-                             * demand ini.
-                             */
-                            'package_ids' =>
-                                $demandPackages
-                                    ->pluck('uuid')
-                                    ->values()
-                                    ->all(),
-
-                            /*
-                             * Sales Order terkait.
-                             */
-                            'order_ids' =>
-                                $demandPackages
-                                    ->map(
-                                        fn (
-                                            Package $package
-                                        ) =>
-                                            $package
-                                                ->order
-                                                ?->uuid
-                                    )
-                                    ->filter()
-                                    ->unique()
-                                    ->values()
-                                    ->all(),
-
-                            /*
-                             * Detail produk.
-                             *
-                             * Ini nantinya juga berguna untuk:
-                             * - preview cluster
-                             * - Flutter
-                             * - manifest driver
-                             */
-                            'items' =>
-                                $demandPackages
-                                    ->map(
-                                        function (
-                                            Package $package
-                                        ): array {
-                                            return [
-                                                'package_id' =>
-                                                    $package
-                                                        ->uuid,
-
-                                                'order_id' =>
-                                                    $package
-                                                        ->order
-                                                        ?->uuid,
-
-                                                'order_number' =>
-                                                    $package
-                                                        ->order
-                                                        ?->order_number,
-
-                                                'product_id' =>
-                                                    $package
-                                                        ->product
-                                                        ?->uuid,
-
-                                                'product_code' =>
-                                                    $package
-                                                        ->product
-                                                        ?->code,
-
-                                                'product_name' =>
-                                                    $package
-                                                        ->item,
-
-                                                'quantity' =>
-                                                    (int)
-                                                    $package
-                                                        ->quantity,
-
-                                                'uom' =>
-                                                    $this
-                                                        ->enumValue(
-                                                            $package
-                                                                ->uom
-                                                        ),
-
-                                                'weight_kg' =>
-                                                    (float)
-                                                    $package
-                                                        ->weight_kg,
-
-                                                'volume_m3' =>
-                                                    (float)
-                                                    $package
-                                                        ->volume_m3,
-
-                                                'unit_price' =>
-                                                    $package
-                                                        ->unit_price
-                                                    !== null
-                                                        ? (float)
-                                                            $package
-                                                                ->unit_price
-                                                        : null,
-
-                                                'total_price' =>
-                                                    $package
-                                                        ->total_price
-                                                    !== null
-                                                        ? (float)
-                                                            $package
-                                                                ->total_price
-                                                        : null,
-                                            ];
-                                        }
-                                    )
-                                    ->values()
-                                    ->all(),
-                        ];
-                    }
-                )
-                ->values();
-
-        /*
-        |--------------------------------------------------------------------------
-        | 5. VEHICLE PAYLOAD
-        |--------------------------------------------------------------------------
-        |
-        | Tidak ada capacity_weight_kg lagi.
-        |
-        | Vehicle ditentukan berdasarkan:
-        |
-        | box_type
-        | +
-        | volume_m3
-        |
-        */
-
-        $vehiclesPayload =
-            $availableVehicles
-                ->map(
-                    function (
-                        Vehicle $vehicle
-                    ): array {
-                        return [
-                            'id' =>
-                                $vehicle->uuid,
-
-                            'plate_number' =>
-                                $vehicle->plate_number,
-
-                            'category' =>
-                                $this->enumValue(
-                                    $vehicle
-                                        ->vehicleType
-                                        ->category
-                                ),
-
-                            'box_type' =>
-                                $this->enumValue(
-                                    $vehicle
-                                        ->vehicleType
-                                        ->box_type
-                                ),
-
-                            'capacity_volume_m3' =>
-                                (float)
-                                $vehicle
-                                    ->vehicleType
-                                    ->volume_m3,
-                        ];
-                    }
-                )
-                ->values();
-
-        /*
-         * Validasi awal sebelum request ke Python.
-         */
-        $this->validateDemandVehicleCompatibility(
-            $demandsPayload,
-            $vehiclesPayload,
-            $readyDrivers->count()
+        $routeSlots = min(
+            $readyDrivers->count(),
+            $availableVehicles->count()
         );
 
+        if ($routeSlots <= 0) {
+            throw new RuntimeException(
+                'Resource driver/vehicle tidak mencukupi untuk membuat route.'
+            );
+        }
+
         /*
         |--------------------------------------------------------------------------
-        | 6. CALL PYTHON
+        | 3. SOURCE SNAPSHOT: so_sda + cust_sda
         |--------------------------------------------------------------------------
-        |
-        | Dilakukan DI LUAR transaction.
-        |
-        | Contract baru:
-        |
-        | branch
-        | demands
-        | vehicles
-        | max_routes
-        |
         */
 
-        $mlUrl =
-            config('services.ml.url');
+        $source = $this->deliverySource->build(
+            branch: $branch,
+            sourceDate: $sourceDate,
+        );
+
+        /** @var Collection<int, array> $demandsPayload */
+        $demandsPayload = $source['demands'];
+
+        if ($demandsPayload->isEmpty()) {
+            throw new RuntimeException(
+                "Tidak ada Sales Order eligible pada {$sourceDate} untuk "
+                . "CAB ID {$branch->cab_id}."
+            );
+        }
+
+        /*
+         * Mirror customer ke stores. Tidak ada lagi CRUD manual store sebagai
+         * sumber route; ini hanya compatibility layer DeliveryStop.store_id.
+         */
+        $storeByCustomerId =
+            $this->deliverySource->syncStores(
+                $demandsPayload
+            );
+
+        $missingStore = $demandsPayload
+            ->first(
+                fn (array $demand): bool =>
+                    ! $storeByCustomerId->has(
+                        (string) $demand['customer_id']
+                    )
+            );
+
+        if ($missingStore) {
+            throw new RuntimeException(
+                'Mirror customer ke tabel stores tidak lengkap.'
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 4. VEHICLE PAYLOAD
+        |--------------------------------------------------------------------------
+        */
+
+        $vehiclesPayload = $availableVehicles
+            ->map(
+                fn (Vehicle $vehicle): array => [
+                    'id' => (string) $vehicle->uuid,
+                    'plate_number' => (string) $vehicle->plate_number,
+                    'category' => $this->enumValue(
+                        $vehicle->vehicleType?->category
+                    ),
+                ]
+            )
+            ->values();
+
+        /*
+        |--------------------------------------------------------------------------
+        | 5. CALL PYTHON
+        |--------------------------------------------------------------------------
+        */
+
+        $mlUrl = config('services.ml.url');
 
         if (
             ! is_string($mlUrl)
@@ -796,1776 +287,698 @@ class RouteGenerationService
             );
         }
 
-        $response =
-            Http::timeout(120)
-                ->post(
-                    rtrim(
-                        $mlUrl,
-                        '/'
-                    )
-                    . '/cluster-and-route',
-                    [
-                        'branch' => [
-                            'latitude' =>
-                                (float)
-                                $branch->latitude,
+        $response = Http::connectTimeout(10)
+            ->timeout(240)
+            ->post(
+                rtrim($mlUrl, '/') . '/cluster-and-route',
+                [
+                    'branch' => [
+                        'latitude' => (float) $branch->latitude,
+                        'longitude' => (float) $branch->longitude,
+                        'start_time' => $deliveryStartTime,
+                    ],
+                    'demands' => $demandsPayload->all(),
+                    'vehicles' => $vehiclesPayload->all(),
+                    'max_routes' => $routeSlots,
+                ]
+            );
 
-                            'longitude' =>
-                                (float)
-                                $branch->longitude,
+        if ($response->failed()) {
+            $detail = $response->json('detail');
 
-                            'start_time' =>
-                                $deliveryStartTime,
-                        ],
+            if (is_array($detail)) {
+                $detail = collect($detail)
+                    ->map(function ($item): string {
+                        if (! is_array($item)) {
+                            return (string) $item;
+                        }
 
-                        /*
-                         * BUKAN stores lagi.
-                         */
-                        'demands' =>
-                            $demandsPayload->all(),
+                        $loc = isset($item['loc']) && is_array($item['loc'])
+                            ? implode('.', array_map('strval', $item['loc']))
+                            : 'request';
 
-                        /*
-                         * Semua kandidat vehicle.
-                         */
-                        'vehicles' =>
-                            $vehiclesPayload->all(),
+                        $msg = (string) ($item['msg'] ?? 'Validation error');
 
-                        /*
-                         * Maksimum route karena setiap
-                         * route membutuhkan satu driver.
-                         */
-                        'max_routes' =>
-                            $readyDrivers->count(),
-                    ]
-                );
+                        return $loc . ': ' . $msg;
+                    })
+                    ->implode(' | ');
+            }
 
-                if ($response->failed()) {
+            if (! is_string($detail) || trim($detail) === '') {
+                $detail = $response->body();
+            }
 
-                    throw new RuntimeException(
-                        'ML service gagal: '
-                        . (
-                            $response->json(
-                                'detail'
-                            )
-                            ?? $response->body()
-                        )
-                    );
-                }
+            throw new RuntimeException(
+                'ML service gagal (HTTP ' . $response->status() . '): ' . $detail
+            );
+        }
 
-                $clusters =
-                    $response->json(
-                        'clusters',
-                        []
-                    );
+        $clusters = $response->json('clusters', []);
+        $deferredDemands = $response->json('deferred_demands', []);
 
-                $deferredDemands =
-                    $response->json(
-                        'deferred_demands',
-                        []
-                    );
+        if (! is_array($clusters)) {
+            throw new RuntimeException(
+                'Format clusters dari ML service tidak valid.'
+            );
+        }
 
-                if (! is_array($clusters)) {
+        if (! empty($deferredDemands)) {
+            throw new RuntimeException(
+                'Optimizer tidak dapat mengalokasikan seluruh customer. '
+                . 'Route generation dibatalkan agar tidak terjadi partial route.'
+            );
+        }
 
-                    throw new RuntimeException(
-                        'Format clusters dari ML service tidak valid.'
-                    );
-                }
+        if (empty($clusters)) {
+            throw new RuntimeException(
+                'ML service tidak mengembalikan hasil cluster.'
+            );
+        }
 
-                if (! is_array($deferredDemands)) {
+        if (count($clusters) > $routeSlots) {
+            throw new RuntimeException(
+                'Optimizer menghasilkan route lebih banyak daripada '
+                . 'resource driver/vehicle yang tersedia.'
+            );
+        }
 
-                    $deferredDemands = [];
-                }
+        /*
+         * Vehicle dipilih Python, tetapi tidak berdasarkan kapasitas/box type.
+         */
+        $selectedVehicleUuids = collect($clusters)
+            ->map(
+                fn (array $cluster) =>
+                    $cluster['vehicle_id'] ?? null
+            )
+            ->filter()
+            ->map(fn ($value): string => (string) $value)
+            ->values();
 
-                /*
-                |--------------------------------------------------------------------------
-                | RESOURCE TIDAK MENCUKUPI
-                |--------------------------------------------------------------------------
-                |
-                | Python sudah menentukan bahwa ada demand yang tidak bisa
-                | dilayani hari ini.
-                |
-                | Karena policy kita ALL-OR-NOTHING:
-                |
-                | - jangan masuk transaction
-                | - jangan membuat route sebagian
-                | - tampilkan alasan yang jelas ke admin
-                |
-                */
+        if (
+            $selectedVehicleUuids->count()
+            !== count($clusters)
+        ) {
+            throw new RuntimeException(
+                'ML service tidak mengembalikan vehicle_id pada seluruh cluster.'
+            );
+        }
 
-                if (! empty($deferredDemands)) {
+        if (
+            $selectedVehicleUuids->unique()->count()
+            !== $selectedVehicleUuids->count()
+        ) {
+            throw new RuntimeException(
+                'ML service menggunakan kendaraan yang sama pada lebih dari satu route.'
+            );
+        }
 
-                    $reasonGroups =
-                        collect(
-                            $deferredDemands
-                        )
-                            ->groupBy(
-                                function (
-                                    array $item
-                                ): string {
+        $availableVehicleByUuid = $availableVehicles
+            ->keyBy(fn (Vehicle $vehicle): string => (string) $vehicle->uuid);
 
-                                    return
-                                        (
-                                            $item['reason']
-                                            ?? 'unknown'
-                                        )
-                                        . '|'
-                                        . (
-                                            $item['box_type']
-                                            ?? 'unknown'
-                                        );
-                                }
-                            );
-
-                    $messages = [];
-
-                    foreach (
-                        $reasonGroups
-                        as $key => $items
-                    ) {
-
-                        [
-                            $reason,
-                            $boxType,
-                        ] = array_pad(
-                            explode(
-                                '|',
-                                $key,
-                                2
-                            ),
-                            2,
-                            'unknown'
-                        );
-
-                        $count =
-                            $items->count();
-
-                        $boxLabel =
-                            match ($boxType) {
-
-                                'dry' =>
-                                    'Dry',
-
-                                'cold_storage' =>
-                                    'Cold Storage',
-
-                                default =>
-                                    ucfirst(
-                                        str_replace(
-                                            '_',
-                                            ' ',
-                                            $boxType
-                                        )
-                                    ),
-                            };
-
-                        $messages[] =
-                            match ($reason) {
-
-                                'insufficient_compatible_vehicle' =>
-                                    "{$count} delivery demand {$boxLabel} "
-                                    . "belum dapat dibuatkan route karena "
-                                    . "kendaraan {$boxLabel} yang tersedia "
-                                    . "tidak mencukupi.",
-
-
-                                'insufficient_route_slots' =>
-                                    "{$count} delivery demand {$boxLabel} "
-                                    . "belum dapat dibuatkan route karena "
-                                    . "jumlah Driver Ready tidak mencukupi.",
-
-
-                                default =>
-                                    "{$count} delivery demand {$boxLabel} "
-                                    . "belum dapat dialokasikan ke route.",
-                            };
-                    }
-
-                    throw new RuntimeException(
-                        'Resource pengiriman tidak mencukupi. '
-                        . implode(
-                            ' ',
-                            $messages
-                        )
-                    );
-                }
-
-                if (empty($clusters)) {
-
-                    throw new RuntimeException(
-                        'ML service tidak mengembalikan hasil cluster.'
-                    );
-                }
-
-                /*
-                 * Jumlah cluster tidak boleh melebihi driver.
-                 */
-                if (
-                    count($clusters)
-                    > $readyDrivers->count()
-                ) {
-                    throw new RuntimeException(
-                        'Optimizer menghasilkan route lebih '
-                        . 'banyak daripada jumlah driver Ready.'
-                    );
-                }
-
-                /*
-                 * Ambil vehicle pilihan Python.
-                 */
-                $selectedVehicleUuids =
-                    collect($clusters)
-                        ->map(
-                            fn (
-                                array $cluster
-                            ) =>
-                                $cluster['vehicle_id'] ?? null
-                        )
-                        ->filter()
-                        ->values();
-
-                if (
-                    $selectedVehicleUuids->count()
-                    !== count($clusters)
-                ) {
-                    throw new RuntimeException(
-                        'ML service tidak mengembalikan '
-                        . 'vehicle_id pada seluruh cluster.'
-                    );
-                }
-
-                /*
-                 * Satu vehicle hanya boleh digunakan
-                 * satu route.
-                 */
-                if (
-                    $selectedVehicleUuids
-                        ->unique()
-                        ->count()
-                    !==
-                    $selectedVehicleUuids
-                        ->count()
-                ) {
-                    throw new RuntimeException(
-                        'ML service menggunakan kendaraan '
-                        . 'yang sama pada lebih dari satu cluster.'
-                    );
-                }
-
-        $availableVehicleByUuid =
-            $availableVehicles
-                ->keyBy('uuid');
-
-        $unknownVehicleUuid =
-            $selectedVehicleUuids
-                ->first(
-                    fn (
-                        string $uuid
-                    ): bool =>
-                        ! $availableVehicleByUuid
-                            ->has(
-                                $uuid
-                            )
-                );
+        $unknownVehicleUuid = $selectedVehicleUuids
+            ->first(
+                fn (string $uuid): bool =>
+                    ! $availableVehicleByUuid->has($uuid)
+            );
 
         if ($unknownVehicleUuid) {
             throw new RuntimeException(
-                "ML service memilih vehicle "
-                . "{$unknownVehicleUuid} yang tidak "
-                . 'ada pada snapshot kendaraan tersedia.'
+                "ML service memilih vehicle {$unknownVehicleUuid} "
+                . 'yang tidak ada pada snapshot kendaraan tersedia.'
             );
         }
 
-        $selectedVehicleIds =
-            $selectedVehicleUuids
-                ->map(
-                    fn (
-                        string $uuid
-                    ): int =>
-                        (int)
-                        $availableVehicleByUuid[
-                            $uuid
-                        ]
-                        ->id
-                )
-                ->values()
-                ->all();
+        $selectedVehicleIds = $selectedVehicleUuids
+            ->map(
+                fn (string $uuid): int =>
+                    (int) $availableVehicleByUuid[$uuid]->id
+            )
+            ->values()
+            ->all();
 
-        /*
-         * Snapshot package ID.
-         */
-        $packageIdsSnapshot =
-            $packages
-                ->pluck('id')
-                ->sort()
-                ->values()
-                ->all();
+        $driverIdsSnapshot = $readyDrivers
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->values()
+            ->all();
 
-        /*
-         * Snapshot driver.
-         */
-        $driverIdsSnapshot =
-            $readyDrivers
-                ->pluck('id')
-                ->values()
-                ->all();
+        $storeIdsSnapshot = $storeByCustomerId
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        $demandById = $demandsPayload
+            ->keyBy(fn (array $demand): string => (string) $demand['id']);
+
+        $expectedDemandIds = $demandById
+            ->keys()
+            ->map(fn ($id): string => (string) $id)
+            ->sort()
+            ->values()
+            ->all();
+
+        $sourceFingerprint = (string) $source['fingerprint'];
 
         /*
         |--------------------------------------------------------------------------
-        | 7. PERSISTENCE TRANSACTION
+        | 6. PERSISTENCE TRANSACTION
         |--------------------------------------------------------------------------
         |
-        | Lock:
-        |
-        | Driver
-        | Vehicle pilihan optimizer
-        | Package
-        | Order
-        |
+        | Source SO/customer bersifat read-only. Tidak ada update status ke so_sda.
         */
 
-        $persisted =
-            DB::transaction(
-                function () use (
-                    $branchId,
-                    $deliveryStartTime,
-                    $clusters,
-                    $packageIdsSnapshot,
-                    $driverIdsSnapshot,
-                    $selectedVehicleIds
-                ): array {
+        $persisted = DB::transaction(
+            function () use (
+                $branch,
+                $branchId,
+                $sourceDate,
+                $routeDate,
+                $deliveryStartTime,
+                $clusters,
+                $driverIdsSnapshot,
+                $selectedVehicleIds,
+                $storeIdsSnapshot,
+                $demandById,
+                $expectedDemandIds,
+                $sourceFingerprint,
+                $source
+            ): array {
+                /*
+                 * Race guard: jangan ada generate paralel untuk branch/date sama.
+                 */
+                $this->assertNoExistingRoutes(
+                    branchId: $branchId,
+                    routeDate: $routeDate,
+                    lock: true,
+                );
 
-                    /*
-                    |--------------------------------------------------------------------------
-                    | LOCK DRIVER
-                    |--------------------------------------------------------------------------
-                    */
+                $lockedDrivers = Driver::query()
+                    ->whereIn('id', $driverIdsSnapshot)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
 
-                    $lockedDrivers =
-                        Driver::query()
-                            ->whereIn(
-                                'id',
-                                $driverIdsSnapshot
+                $busyDriverIds = DeliveryRoute::query()
+                    ->whereDate('route_date', $routeDate)
+                    ->where('status', '!=', RouteStatus::Cancelled->value)
+                    ->whereIn('driver_id', $driverIdsSnapshot)
+                    ->pluck('driver_id')
+                    ->all();
+
+                $availableLockedDrivers = $lockedDrivers
+                    ->filter(
+                        fn (Driver $driver): bool =>
+                            (int) $driver->branch_id === $branchId
+                            && $driver->status === DriverStatus::Ready
+                            && ! in_array(
+                                $driver->id,
+                                $busyDriverIds,
+                                true
                             )
-                            ->orderBy('id')
-                            ->lockForUpdate()
-                            ->get();
-
-                    /*
-                     * Driver mungkin dipakai proses lain
-                     * ketika Python sedang bekerja.
-                     */
-                    $busyDriverIds =
-                        DeliveryRoute::query()
-                            ->whereDate(
-                                'route_date',
-                                today()
-                            )
-                            ->where(
-                                'status',
-                                '!=',
-                                RouteStatus
-                                    ::Cancelled
-                                    ->value
-                            )
-                            ->whereIn(
-                                'driver_id',
-                                $driverIdsSnapshot
-                            )
-                            ->pluck(
-                                'driver_id'
-                            )
-                            ->all();
-
-                    $availableLockedDrivers =
-                        $lockedDrivers
-                            ->filter(
-                                function (
-                                    Driver $driver
-                                ) use (
-                                    $branchId,
-                                    $busyDriverIds
-                                ): bool {
-                                    return
-                                        (int)
-                                        $driver
-                                            ->branch_id
-                                        ===
-                                        $branchId
-
-                                        &&
-
-                                        $driver
-                                            ->status
-                                        ===
-                                        DriverStatus
-                                            ::Ready
-
-                                        &&
-
-                                        ! in_array(
-                                            $driver->id,
-                                            $busyDriverIds,
-                                            true
-                                        );
-                                }
-                            )
-                            ->values();
-
-                    if (
-                        $availableLockedDrivers
-                            ->count()
-                        <
-                        count($clusters)
-                    ) {
-                        throw new RuntimeException(
-                            'Jumlah driver Ready berubah '
-                            . 'saat optimasi berlangsung. '
-                            . 'Silakan generate ulang.'
-                        );
-                    }
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | LOCK VEHICLE
-                    |--------------------------------------------------------------------------
-                    */
-
-                    $lockedVehicles =
-                        Vehicle::query()
-                            ->with(
-                                'vehicleType'
-                            )
-                            ->whereIn(
-                                'id',
-                                $selectedVehicleIds
-                            )
-                            ->orderBy('id')
-                            ->lockForUpdate()
-                            ->get();
-
-                    if (
-                        $lockedVehicles
-                            ->count()
-                        !==
-                        count(
-                            $selectedVehicleIds
-                        )
-                    ) {
-                        throw new RuntimeException(
-                            'Snapshot kendaraan berubah '
-                            . 'saat optimasi berlangsung. '
-                            . 'Silakan generate ulang.'
-                        );
-                    }
-
-                    $invalidLockedVehicle =
-                        $lockedVehicles
-                            ->first(
-                                fn (
-                                    Vehicle $vehicle
-                                ): bool =>
-
-                                    (int)
-                                    $vehicle
-                                        ->branch_id
-                                    !==
-                                    $branchId
-
-                                    ||
-
-                                    $vehicle
-                                        ->status
-                                    !==
-                                    VehicleStatus
-                                        ::Active
-
-                                    ||
-
-                                    ! $vehicle
-                                        ->vehicleType
-
-                                    ||
-
-                                    (float) (
-                                        $vehicle
-                                            ->vehicleType
-                                            ->volume_m3
-                                        ?? 0
-                                    )
-                                    <= 0
-
-                                    ||
-
-                                    ! $this
-                                        ->enumValue(
-                                            $vehicle
-                                                ->vehicleType
-                                                ->box_type
-                                        )
-                            );
-
-                    if (
-                        $invalidLockedVehicle
-                    ) {
-                        throw new RuntimeException(
-                            'Status, cabang, box type, '
-                            . 'atau kapasitas kendaraan '
-                            . 'berubah saat optimasi '
-                            . 'berlangsung. '
-                            . 'Silakan generate ulang.'
-                        );
-                    }
-
-                    /*
-                     * Pastikan vehicle belum digunakan
-                     * proses lain.
-                     */
-                    $vehicleConflict =
-                        DeliveryRoute::query()
-                            ->whereDate(
-                                'route_date',
-                                today()
-                            )
-                            ->where(
-                                'status',
-                                '!=',
-                                RouteStatus
-                                    ::Cancelled
-                                    ->value
-                            )
-                            ->whereIn(
-                                'vehicle_id',
-                                $selectedVehicleIds
-                            )
-                            ->exists();
-
-                    if (
-                        $vehicleConflict
-                    ) {
-                        throw new RuntimeException(
-                            'Kendaraan yang dipilih '
-                            . 'optimizer baru saja digunakan '
-                            . 'oleh proses lain. '
-                            . 'Silakan generate ulang.'
-                        );
-                    }
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | LOCK PACKAGE
-                    |--------------------------------------------------------------------------
-                    */
-
-                    $lockedPackages =
-                        Package::query()
-                            ->with([
-                                'product',
-                                'order.store.area',
-                            ])
-                            ->whereIn(
-                                'id',
-                                $packageIdsSnapshot
-                            )
-                            ->orderBy('id')
-                            ->lockForUpdate()
-                            ->get();
-
-                    $lockedPackageIds =
-                        $lockedPackages
-                            ->pluck('id')
-                            ->sort()
-                            ->values()
-                            ->all();
-
-                    if (
-                        $lockedPackageIds
-                        !==
-                        $packageIdsSnapshot
-                    ) {
-                        throw new RuntimeException(
-                            'Snapshot package berubah '
-                            . 'saat optimasi berlangsung. '
-                            . 'Silakan generate ulang.'
-                        );
-                    }
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | LOCK SALES ORDER
-                    |--------------------------------------------------------------------------
-                    */
-
-                    $orderIds =
-                        $lockedPackages
-                            ->pluck(
-                                'order_id'
-                            )
-                            ->unique()
-                            ->sort()
-                            ->values()
-                            ->all();
-
-                    $lockedOrders =
-                        Order::query()
-                            ->whereIn(
-                                'id',
-                                $orderIds
-                            )
-                            ->orderBy('id')
-                            ->lockForUpdate()
-                            ->get()
-                            ->keyBy('id');
-
-                    if (
-                        $lockedOrders
-                            ->count()
-                        !==
-                        count($orderIds)
-                    ) {
-                        throw new RuntimeException(
-                            'Snapshot Sales Order berubah '
-                            . 'saat optimasi berlangsung. '
-                            . 'Silakan generate ulang.'
-                        );
-                    }
-
-                    /*
-                     * Validasi ulang.
-                     */
-                    $stalePackage =
-                        $lockedPackages
-                            ->first(
-                                function (
-                                    Package $package
-                                ) use (
-                                    $branchId,
-                                    $lockedOrders
-                                ): bool {
-
-                                    /** @var Order|null $order */
-                                    $order =
-                                        $lockedOrders
-                                            ->get(
-                                                $package
-                                                    ->order_id
-                                            );
-
-                                    return
-                                        ! $order
-
-                                        ||
-
-                                        $package
-                                            ->status
-                                        !==
-                                        PackageStatus
-                                            ::Pending
-
-                                        ||
-
-                                        $order
-                                            ->status
-                                        !==
-                                        OrderStatus
-                                            ::Pending
-
-                                        ||
-
-                                        ! $order
-                                            ->scheduled_date
-                                            ?->isToday()
-
-                                        ||
-
-                                        (int)
-                                        $package
-                                            ->order
-                                            ?->store
-                                            ?->area
-                                            ?->branch_id
-                                        !==
-                                        $branchId
-
-                                        ||
-
-                                        ! $package
-                                            ->product_id
-
-                                        ||
-
-                                        ! $this
-                                            ->enumValue(
-                                                $package
-                                                    ->box_type
-                                            )
-
-                                        ||
-
-                                        (float) (
-                                            $package
-                                                ->volume_m3
-                                            ?? 0
-                                        )
-                                        <= 0;
-                                }
-                            );
-
-                    if ($stalePackage) {
-                        throw new RuntimeException(
-                            "Package "
-                            . "{$stalePackage->tracking_number} "
-                            . 'atau Sales Order terkait '
-                            . 'berubah saat optimasi '
-                            . 'berlangsung. '
-                            . 'Silakan generate ulang.'
-                        );
-                    }
-
-                    /*
-                     * Bentuk ulang demand dari snapshot
-                     * yang sudah di-lock.
-                     */
-                    $packagesByDemandId =
-                        $lockedPackages
-                            ->groupBy(
-                                fn (
-                                    Package $package
-                                ): string =>
-                                    $this
-                                        ->demandIdForPackage(
-                                            $package
-                                        )
-                            );
-
-                    $vehiclesByUuid =
-                        $lockedVehicles
-                            ->keyBy('uuid');
-
-                    /*
-                     * Supaya driver assignment
-                     * deterministic.
-                     */
-                    $sortedClusters =
-                        collect($clusters)
-                            ->sortBy(
-                                fn (
-                                    array $cluster
-                                ) =>
-                                    (int) (
-                                        $cluster[
-                                            'cluster_id'
-                                        ]
-                                        ?? PHP_INT_MAX
-                                    )
-                            )
-                            ->values();
-
-                    $assignedPackageIds = [];
-                    $assignedOrderIds = [];
-                    $routeUuids = [];
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | CREATE ROUTE
-                    |--------------------------------------------------------------------------
-                    */
-
-                    foreach (
-                        $sortedClusters
-                        as
-                        $clusterIndex =>
-                        $cluster
-                    ) {
-
-                        /*
-                         * Driver dipilih Laravel.
-                         */
-                        $driver =
-                            $availableLockedDrivers[
-                                $clusterIndex
-                            ];
-
-                        /*
-                         * Vehicle dipilih Python.
-                         */
-                        $vehicleUuid =
-                            $cluster[
-                                'vehicle_id'
-                            ]
-                            ?? null;
-
-                        $vehicle =
-                            $vehiclesByUuid
-                                ->get(
-                                    $vehicleUuid
-                                );
-
-                        if (! $vehicle) {
-                            throw new RuntimeException(
-                                'Vehicle hasil optimizer '
-                                . 'tidak ditemukan pada '
-                                . 'snapshot persistence.'
-                            );
-                        }
-
-                        /*
-                         * Validasi box type.
-                         */
-                        $clusterBoxType =
-                            (string) (
-                                $cluster[
-                                    'box_type'
-                                ]
-                                ?? ''
-                            );
-
-                        $vehicleBoxType =
-                            $this
-                                ->enumValue(
-                                    $vehicle
-                                        ->vehicleType
-                                        ->box_type
-                                );
-
-                        if (
-                            $clusterBoxType === ''
-                            ||
-                            $clusterBoxType
-                            !==
-                            $vehicleBoxType
-                        ) {
-                            throw new RuntimeException(
-                                "Cluster {$clusterIndex} "
-                                . 'memiliki box type yang '
-                                . 'tidak sesuai dengan '
-                                . "vehicle "
-                                . "{$vehicle->plate_number}."
-                            );
-                        }
-
-                        $optimizedRoute =
-                            $cluster[
-                                'optimized_route'
-                            ]
-                            ?? [];
-
-                        if (
-                            ! is_array(
-                                $optimizedRoute
-                            )
-                            ||
-                            empty(
-                                $optimizedRoute
-                            )
-                        ) {
-                            throw new RuntimeException(
-                                'ML service mengembalikan '
-                                . 'cluster tanpa '
-                                . 'optimized_route.'
-                            );
-                        }
-
-                        /*
-                         * Contract stop Python.
-                         */
-                        foreach (
-                            $optimizedRoute
-                            as
-                            $stopData
-                        ) {
-                            foreach (
-                                [
-                                    'demand_id',
-                                    'store_id',
-                                    'sequence',
-                                    'arrival_time',
-                                    'service_start',
-                                    'service_end',
-                                ]
-                                as
-                                $requiredKey
-                            ) {
-                                if (
-                                    ! array_key_exists(
-                                        $requiredKey,
-                                        $stopData
-                                    )
-                                ) {
-                                    throw new RuntimeException(
-                                        "ML service tidak "
-                                        . "mengembalikan field "
-                                        . "stop '{$requiredKey}' "
-                                        . 'secara lengkap.'
-                                    );
-                                }
-                            }
-                        }
-
-                        /*
-                         * Demand tidak boleh muncul dua kali
-                         * dalam satu route.
-                         */
-                        $routeDemandIds =
-                            collect(
-                                $optimizedRoute
-                            )
-                            ->pluck(
-                                'demand_id'
-                            )
-                            ->values();
-
-                        if (
-                            $routeDemandIds
-                                ->unique()
-                                ->count()
-                            !==
-                            $routeDemandIds
-                                ->count()
-                        ) {
-                            throw new RuntimeException(
-                                'Optimizer mengembalikan '
-                                . 'demand yang sama lebih '
-                                . 'dari satu kali dalam '
-                                . 'satu route.'
-                            );
-                        }
-
-                        /*
-                         * Ambil package seluruh demand
-                         * dalam cluster.
-                         */
-                        $routePackages =
-                            $routeDemandIds
-                                ->flatMap(
-                                    fn (
-                                        string $demandId
-                                    ): Collection =>
-                                        $packagesByDemandId
-                                            ->get(
-                                                $demandId,
-                                                collect()
-                                            )
-                                );
-
-                        if (
-                            $routePackages
-                                ->isEmpty()
-                        ) {
-                            throw new RuntimeException(
-                                'Cluster tidak memiliki '
-                                . 'package yang dapat '
-                                . 'di-assign.'
-                            );
-                        }
-
-                        /*
-                         * Pastikan tidak ada Dry + Cold
-                         * dalam satu cluster.
-                         */
-                        $invalidDemandBoxType =
-                            $routePackages
-                                ->first(
-                                    fn (
-                                        Package $package
-                                    ): bool =>
-                                        $this
-                                            ->enumValue(
-                                                $package
-                                                    ->box_type
-                                            )
-                                        !==
-                                        $clusterBoxType
-                                );
-
-                        if (
-                            $invalidDemandBoxType
-                        ) {
-                            throw new RuntimeException(
-                                'Optimizer mencampurkan '
-                                . 'package dengan box type '
-                                . 'berbeda dalam satu '
-                                . 'cluster.'
-                            );
-                        }
-
-                        /*
-                         * Validasi kapasitas volume
-                         * secara independen di Laravel.
-                         */
-                        $routeVolume =
-                            (float)
-                            $routePackages
-                                ->sum(
-                                    fn (
-                                        Package $package
-                                    ): float =>
-                                        (float)
-                                        $package
-                                            ->volume_m3
-                                );
-
-                        $vehicleCapacity =
-                            (float)
-                            $vehicle
-                                ->vehicleType
-                                ->volume_m3;
-
-                        if (
-                            $routeVolume
-                            >
-                            $vehicleCapacity
-                            + 0.000001
-                        ) {
-                            throw new RuntimeException(
-                                "Total volume cluster "
-                                . "{$routeVolume} m3 "
-                                . 'melebihi kapasitas '
-                                . "vehicle "
-                                . "{$vehicle->plate_number} "
-                                . "({$vehicleCapacity} m3)."
-                            );
-                        }
-
-                        /*
-                         * Predicted duration.
-                         */
-                        $lastStop =
-                            end(
-                                $optimizedRoute
-                            );
-
-                        $predictedDuration =
-                            $this
-                                ->minutesBetween(
-                                    $deliveryStartTime,
-                                    $lastStop[
-                                        'service_end'
-                                    ]
-                                );
-
-                        /*
-                         * CREATE DELIVERY ROUTE.
-                         */
-                        $route =
-                            DeliveryRoute::create([
-                                'branch_id' =>
-                                    $branchId,
-
-                                'driver_id' =>
-                                    $driver->id,
-
-                                'vehicle_id' =>
-                                    $vehicle->id,
-
-                                /*
-                                 * Area tidak digunakan
-                                 * sebagai dasar clustering.
-                                 */
-                                'area_id' =>
-                                    null,
-
-                                'route_date' =>
-                                    today(),
-
-                                'status' =>
-                                    RouteStatus
-                                        ::Planned,
-
-                                'predicted_duration_minutes' =>
-                                    max(
-                                        0,
-                                        $predictedDuration
-                                    ),
-
-                                'predicted_package_count' =>
-                                    $routePackages
-                                        ->count(),
-                            ]);
-
-                        $routeUuids[] =
-                            $route->uuid;
-
-                        /*
-                        |--------------------------------------------------------------------------
-                        | CREATE DELIVERY STOP
-                        |--------------------------------------------------------------------------
-                        */
-
-                        foreach (
-                            $optimizedRoute
-                            as
-                            $stopData
-                        ) {
-                            $demandId =
-                                (string)
-                                $stopData[
-                                    'demand_id'
-                                ];
-
-                            $demandPackages =
-                                $packagesByDemandId
-                                    ->get(
-                                        $demandId,
-                                        collect()
-                                    );
-
-                            if (
-                                $demandPackages
-                                    ->isEmpty()
-                            ) {
-                                throw new RuntimeException(
-                                    "Demand hasil optimizer "
-                                    . "({$demandId}) tidak "
-                                    . 'ditemukan pada '
-                                    . 'snapshot Laravel.'
-                                );
-                            }
-
-                            /** @var Package $firstDemandPackage */
-                            $firstDemandPackage =
-                                $demandPackages
-                                    ->first();
-
-                            $store =
-                                $firstDemandPackage
-                                    ->order
-                                    ?->store;
-
-                            /*
-                             * Python harus mengembalikan
-                             * store yang sama.
-                             */
-                            if (
-                                ! $store
-                                ||
-                                $store->uuid
-                                !==
-                                (
-                                    $stopData[
-                                        'store_id'
-                                    ]
-                                    ?? null
-                                )
-                            ) {
-                                throw new RuntimeException(
-                                    "Store hasil optimizer "
-                                    . "untuk demand "
-                                    . "{$demandId} tidak "
-                                    . 'sesuai dengan '
-                                    . 'snapshot Laravel.'
-                                );
-                            }
-
-                            if (
-                                $this
-                                    ->enumValue(
-                                        $firstDemandPackage
-                                            ->box_type
-                                    )
-                                !==
-                                $clusterBoxType
-                            ) {
-                                throw new RuntimeException(
-                                    "Demand {$demandId} "
-                                    . 'memiliki box type '
-                                    . 'yang tidak sesuai '
-                                    . 'dengan cluster.'
-                                );
-                            }
-
-                            $stop =
-                                DeliveryStop::create([
-                                    'delivery_route_id' =>
-                                        $route->id,
-
-                                    'store_id' =>
-                                        $store->id,
-
-                                    'sequence_order' =>
-                                        (int)
-                                        $stopData[
-                                            'sequence'
-                                        ],
-
-                                    'predicted_arrival_time' =>
-                                        today()
-                                            ->setTimeFromTimeString(
-                                                $stopData[
-                                                    'arrival_time'
-                                                ]
-                                            ),
-
-                                    'predicted_service_start_time' =>
-                                        today()
-                                            ->setTimeFromTimeString(
-                                                $stopData[
-                                                    'service_start'
-                                                ]
-                                            ),
-
-                                    'predicted_service_end_time' =>
-                                        today()
-                                            ->setTimeFromTimeString(
-                                                $stopData[
-                                                    'service_end'
-                                                ]
-                                            ),
-
-                                    'predicted_waiting_minutes' =>
-                                        (int) (
-                                            $stopData[
-                                                'waiting_minutes'
-                                            ]
-                                            ?? 0
-                                        ),
-                                ]);
-
-                            /*
-                             * Attach package yang memang
-                             * termasuk demand tersebut.
-                             *
-                             * Ini penting karena satu toko
-                             * bisa punya Dry dan Cold.
-                             */
-                            $pivotRows = [];
-
-                            foreach (
-                                $demandPackages
-                                as
-                                $package
-                            ) {
-                                if (
-                                    in_array(
-                                        $package->id,
-                                        $assignedPackageIds,
-                                        true
-                                    )
-                                ) {
-                                    throw new RuntimeException(
-                                        "Package "
-                                        . "{$package->tracking_number} "
-                                        . 'terdeteksi di-assign '
-                                        . 'lebih dari satu kali.'
-                                    );
-                                }
-
-                                $pivotRows[
-                                    $package->id
-                                ] = [
-                                    'uuid' =>
-                                        (string)
-                                        Str::uuid(),
-
-                                    'created_at' =>
-                                        now(),
-
-                                    'updated_at' =>
-                                        now(),
-                                ];
-
-                                $assignedPackageIds[] =
-                                    $package->id;
-
-                                $assignedOrderIds[] =
-                                    $package->order_id;
-                            }
-
-                            $stop
-                                ->packages()
-                                ->attach(
-                                    $pivotRows
-                                );
-                        }
-                    }
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | FINAL VALIDATION
-                    |--------------------------------------------------------------------------
-                    |
-                    | Semua package snapshot WAJIB ter-assign.
-                    |
-                    | Tidak ada partial route generation.
-                    |
-                    */
-
-                    sort(
-                        $assignedPackageIds
+                    )
+                    ->values();
+
+                if (
+                    $availableLockedDrivers->count()
+                    < count($clusters)
+                ) {
+                    throw new RuntimeException(
+                        'Jumlah driver Ready berubah saat optimasi berlangsung. '
+                        . 'Silakan generate ulang.'
+                    );
+                }
+
+                $lockedVehicles = Vehicle::query()
+                    ->whereIn('id', $selectedVehicleIds)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
+
+                if (
+                    $lockedVehicles->count()
+                    !== count($selectedVehicleIds)
+                ) {
+                    throw new RuntimeException(
+                        'Snapshot kendaraan berubah saat optimasi berlangsung.'
+                    );
+                }
+
+                $invalidVehicle = $lockedVehicles
+                    ->first(
+                        fn (Vehicle $vehicle): bool =>
+                            (int) $vehicle->branch_id !== $branchId
+                            || $vehicle->status !== VehicleStatus::Active
                     );
 
-                    if (
-                        $assignedPackageIds
-                        !==
-                        $packageIdsSnapshot
-                    ) {
+                if ($invalidVehicle) {
+                    throw new RuntimeException(
+                        'Status atau cabang kendaraan berubah saat optimasi berlangsung.'
+                    );
+                }
+
+                $vehicleConflict = DeliveryRoute::query()
+                    ->whereDate('route_date', $routeDate)
+                    ->where('status', '!=', RouteStatus::Cancelled->value)
+                    ->whereIn('vehicle_id', $selectedVehicleIds)
+                    ->exists();
+
+                if ($vehicleConflict) {
+                    throw new RuntimeException(
+                        'Kendaraan hasil optimizer baru saja digunakan proses lain.'
+                    );
+                }
+
+                $lockedStores = Store::query()
+                    ->whereIn('id', $storeIdsSnapshot)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('code');
+
+                if (
+                    $lockedStores->count()
+                    !== count($storeIdsSnapshot)
+                ) {
+                    throw new RuntimeException(
+                        'Mirror customer berubah saat optimasi berlangsung.'
+                    );
+                }
+
+                /*
+                 * Re-read source setelah proses Python. Jika database source
+                 * direplace di tengah proses, jangan persist hasil lama.
+                 */
+                $freshSource = $this->deliverySource->build(
+                    branch: $branch,
+                    sourceDate: $sourceDate,
+                );
+
+                if (
+                    (string) $freshSource['fingerprint']
+                    !== $sourceFingerprint
+                ) {
+                    throw new RuntimeException(
+                        'Data so_sda/cust_sda berubah saat optimasi berlangsung. '
+                        . 'Silakan generate ulang.'
+                    );
+                }
+
+                $vehiclesByUuid = $lockedVehicles
+                    ->keyBy(fn (Vehicle $vehicle): string => (string) $vehicle->uuid);
+
+                $sortedClusters = collect($clusters)
+                    ->sortBy(
+                        fn (array $cluster): int =>
+                            (int) ($cluster['cluster_id'] ?? PHP_INT_MAX)
+                    )
+                    ->values();
+
+                $assignedDemandIds = [];
+                $routeUuids = [];
+                $assignedItemCount = 0;
+
+                foreach (
+                    $sortedClusters
+                    as $clusterIndex => $cluster
+                ) {
+                    $driver = $availableLockedDrivers[$clusterIndex];
+
+                    $vehicleUuid = (string) ($cluster['vehicle_id'] ?? '');
+                    $vehicle = $vehiclesByUuid->get($vehicleUuid);
+
+                    if (! $vehicle) {
                         throw new RuntimeException(
-                            'Tidak seluruh package '
-                            . 'Sales Order ter-assign '
-                            . 'ke route. Seluruh '
-                            . 'perubahan dibatalkan.'
+                            'Vehicle hasil optimizer tidak ditemukan pada snapshot persistence.'
                         );
                     }
 
-                    /*
-                     * Package:
-                     *
-                     * pending → assigned
-                     */
-                    Package::query()
-                        ->whereIn(
-                            'id',
-                            $assignedPackageIds
-                        )
-                        ->update([
-                            'status' =>
-                                PackageStatus
-                                    ::Assigned
-                                    ->value,
-                        ]);
+                    $optimizedRoute = $cluster['optimized_route'] ?? [];
 
-                    /*
-                     * Sales Order:
-                     *
-                     * pending → processing
-                     */
-                    Order::query()
-                        ->whereIn(
-                            'id',
-                            array_values(
-                                array_unique(
-                                    $assignedOrderIds
-                                )
+                    if (
+                        ! is_array($optimizedRoute)
+                        || empty($optimizedRoute)
+                    ) {
+                        throw new RuntimeException(
+                            'ML service mengembalikan cluster tanpa optimized_route.'
+                        );
+                    }
+
+                    foreach ($optimizedRoute as $stopData) {
+                        foreach (
+                            [
+                                'demand_id',
+                                'sequence',
+                                'arrival_time',
+                                'service_start',
+                                'service_end',
+                            ]
+                            as $requiredKey
+                        ) {
+                            if (! array_key_exists($requiredKey, $stopData)) {
+                                throw new RuntimeException(
+                                    "ML service tidak mengembalikan field stop "
+                                    . "'{$requiredKey}' secara lengkap."
+                                );
+                            }
+                        }
+                    }
+
+                    $routeDemandIds = collect($optimizedRoute)
+                        ->pluck('demand_id')
+                        ->map(fn ($id): string => (string) $id)
+                        ->values();
+
+                    if (
+                        $routeDemandIds->unique()->count()
+                        !== $routeDemandIds->count()
+                    ) {
+                        throw new RuntimeException(
+                            'Optimizer mengembalikan demand yang sama lebih dari satu kali.'
+                        );
+                    }
+
+                    $routeItemCount = $routeDemandIds
+                        ->sum(
+                            function (string $demandId) use ($demandById): int {
+                                $demand = $demandById->get($demandId);
+
+                                if (! $demand) {
+                                    throw new RuntimeException(
+                                        "Demand optimizer {$demandId} tidak ditemukan "
+                                        . 'pada source snapshot.'
+                                    );
+                                }
+
+                                return count($demand['items'] ?? []);
+                            }
+                        );
+
+                    $lastStop = collect($optimizedRoute)
+                        ->sortBy('sequence')
+                        ->last();
+
+                    $predictedDuration = $this->minutesBetween(
+                        $deliveryStartTime,
+                        (string) $lastStop['service_end']
+                    );
+
+                    $route = DeliveryRoute::create([
+                        'branch_id' => $branchId,
+                        'driver_id' => $driver->id,
+                        'vehicle_id' => $vehicle->id,
+                        'area_id' => null,
+                        'source_date' => $sourceDate,
+                        'route_date' => $routeDate,
+                        'status' => RouteStatus::Planned,
+                        'predicted_duration_minutes' => max(
+                            0,
+                            $predictedDuration
+                        ),
+
+                        /*
+                         * Kolom legacy. Untuk sementara berisi jumlah item SO
+                         * yang dibawa route sampai schema UI selesai direvisi.
+                         */
+                        'predicted_package_count' => $routeItemCount,
+                    ]);
+
+                    $routeUuids[] = (string) $route->uuid;
+
+                    foreach ($optimizedRoute as $stopData) {
+                        $demandId = (string) $stopData['demand_id'];
+
+                        if (
+                            in_array(
+                                $demandId,
+                                $assignedDemandIds,
+                                true
                             )
-                        )
-                        ->where(
-                            'status',
-                            OrderStatus::Pending
-                        )
-                        ->update([
-                            'status' =>
-                                OrderStatus
-                                    ::Processing
-                                    ->value,
+                        ) {
+                            throw new RuntimeException(
+                                "Demand {$demandId} terdeteksi di-assign lebih dari sekali."
+                            );
+                        }
+
+                        $demand = $demandById->get($demandId);
+
+                        if (! $demand) {
+                            throw new RuntimeException(
+                                "Demand {$demandId} tidak ditemukan pada source snapshot."
+                            );
+                        }
+
+                        $customerId = (string) $demand['customer_id'];
+                        $store = $lockedStores->get($customerId);
+
+                        if (! $store) {
+                            throw new RuntimeException(
+                                "Store mirror customer {$customerId} tidak ditemukan."
+                            );
+                        }
+
+                        DeliveryStop::create([
+                            'delivery_route_id' => $route->id,
+                            'store_id' => $store->id,
+                            'source_customer_code' => $customerId,
+                            'source_so_numbers' => $demand['so_numbers'] ?? [],
+                            'sequence_order' => (int) $stopData['sequence'],
+                            'predicted_arrival_time' => $this->routeDateTime(
+                                $routeDate,
+                                (string) $stopData['arrival_time']
+                            ),
+                            'predicted_service_start_time' => $this->routeDateTime(
+                                $routeDate,
+                                (string) $stopData['service_start']
+                            ),
+                            'predicted_service_end_time' => $this->routeDateTime(
+                                $routeDate,
+                                (string) $stopData['service_end']
+                            ),
+                            'predicted_waiting_minutes' => (int) (
+                                $stopData['waiting_minutes'] ?? 0
+                            ),
                         ]);
 
-                    return [
-                        'route_count' =>
-                            count(
-                                $routeUuids
-                            ),
-
-                        'route_uuids' =>
-                            $routeUuids,
-
-                        'package_count' =>
-                            count(
-                                $assignedPackageIds
-                            ),
-                    ];
+                        $assignedDemandIds[] = $demandId;
+                        $assignedItemCount += count(
+                            $demand['items'] ?? []
+                        );
+                    }
                 }
-            );
 
-        /*
-        |--------------------------------------------------------------------------
-        | RESULT
-        |--------------------------------------------------------------------------
-        */
+                sort($assignedDemandIds);
+
+                if ($assignedDemandIds !== $expectedDemandIds) {
+                    throw new RuntimeException(
+                        'Tidak seluruh customer demand ter-assign ke route. '
+                        . 'Seluruh perubahan dibatalkan.'
+                    );
+                }
+
+                return [
+                    'route_count' => count($routeUuids),
+                    'route_uuids' => $routeUuids,
+                    'item_count' => $assignedItemCount,
+                    'demand_count' => count($assignedDemandIds),
+                ];
+            }
+        );
 
         return [
-            'branch_id' =>
-                $branchId,
+            'branch_id' => $branchId,
+            'cab_id' => (string) $branch->cab_id,
+            'source_date' => $sourceDate,
+            'route_date' => $routeDate,
+            'branch_start_time' => $branchStartTime,
+            'generated_at' => $generatedAt,
+            'preparation_minutes' => self::DEFAULT_ROUTE_PREPARATION_MINUTES,
+            'delivery_start_time' => $deliveryStartTime,
 
-            /*
-            |--------------------------------------------------------------------------
-            | ROUTE PLANNING TIME
-            |--------------------------------------------------------------------------
-            */
+            'demand_count' => $persisted['demand_count'],
+            'customer_count' => $source['customer_count'],
+            'order_count' => $source['order_count'],
+            'source_line_count' => $source['row_count'],
+            'item_count' => $persisted['item_count'],
 
-            'branch_start_time' =>
-                $branchStartTime,
+            /* compatibility sementara dengan ListDeliveryRoutes lama */
+            'package_count' => $source['row_count'],
 
-            'generated_at' =>
-                $now->format(
-                    'Y-m-d H:i:s'
-                ),
+            'driver_count' => $persisted['route_count'],
+            'vehicle_count' => $persisted['route_count'],
+            'candidate_vehicle_count' => $availableVehicles->count(),
+            'route_count' => $persisted['route_count'],
+            'route_uuids' => $persisted['route_uuids'],
 
-            'preparation_minutes' =>
-                self::DEFAULT_ROUTE_PREPARATION_MINUTES,
-
-            'delivery_start_time' =>
-                $deliveryStartTime,
-
-            /*
-            |--------------------------------------------------------------------------
-            | SUMMARY
-            |--------------------------------------------------------------------------
-            */
-
-            'demand_count' =>
-                $demandsPayload->count(),
-
-            /*
-             * Driver yang benar-benar digunakan.
-             */
-            'driver_count' =>
-                $persisted[
-                    'route_count'
-                ],
-
-            /*
-             * Vehicle yang benar-benar digunakan.
-             */
-            'vehicle_count' =>
-                $persisted[
-                    'route_count'
-                ],
-
-            /*
-             * Vehicle kandidat sebelum optimasi.
-             */
-            'candidate_vehicle_count' =>
-                $availableVehicles->count(),
-
-            'package_count' =>
-                $persisted[
-                    'package_count'
-                ],
-
-            'route_count' =>
-                $persisted[
-                    'route_count'
-                ],
-
-            'route_uuids' =>
-                $persisted[
-                    'route_uuids'
-                ],
-
-            'clustering_summary' =>
-                $response->json(
-                    'clustering_summary'
-                ),
-
-            'clusters' =>
-                $clusters,
-            
-            'deferred_demands' =>
-                $response->json(
-                    'deferred_demands',
-                    []
-                ),
+            'clustering_summary' => $response->json(
+                'clustering_summary'
+            ),
+            'clusters' => $clusters,
+            'deferred_demands' => [],
         ];
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | PRE-VALIDATION DEMAND VS VEHICLE
-    |--------------------------------------------------------------------------
-    |
-    | Tujuannya agar error yang sederhana sudah diketahui
-    | di Laravel sebelum memanggil Google/Python.
-    |
-    */
-
-    protected function validateDemandVehicleCompatibility(
-        Collection $demands,
-        Collection $vehicles,
-        int $readyDriverCount
-    ): void {
-        $demandsByBoxType =
-            $demands->groupBy(
-                'box_type'
-            );
-
-        $vehiclesByBoxType =
-            $vehicles->groupBy(
-                'box_type'
-            );
-
-        /*
-         * Setiap box type minimal membutuhkan
-         * satu route.
-         */
-        if (
-            $demandsByBoxType
-                ->count()
-            >
-            $readyDriverCount
-        ) {
-            throw new RuntimeException(
-                'Jumlah jenis box pada Sales Order '
-                . 'hari ini melebihi jumlah driver Ready. '
-                . 'Minimal dibutuhkan satu route/driver '
-                . 'untuk setiap jenis box.'
-            );
-        }
-
-        /*
-         * Lower bound jumlah route.
-         */
-        $minimumRouteLowerBound = 0;
-
-        foreach (
-            $demandsByBoxType
-            as
-            $boxType =>
-            $boxDemands
-        ) {
-            /** @var Collection $candidateVehicles */
-            $candidateVehicles =
-                $vehiclesByBoxType
-                    ->get(
-                        $boxType,
-                        collect()
-                    );
-
-            /*
-             * Tidak ada vehicle sesuai box.
-             */
-            if (
-                $candidateVehicles
-                    ->isEmpty()
-            ) {
-                throw new RuntimeException(
-                    "Ada Sales Order bertipe "
-                    . "{$boxType}, tetapi tidak "
-                    . 'ada vehicle Active dengan '
-                    . 'box type yang sama.'
-                );
-            }
-
-            /*
-             * Kapasitas vehicle terbesar.
-             */
-            $maxVehicleCapacity =
-                (float)
-                $candidateVehicles
-                    ->max(
-                        'capacity_volume_m3'
-                    );
-
-            /*
-             * Satu toko sendiri saja tidak muat.
-             */
-            $oversizedDemand =
-                $boxDemands
-                    ->first(
-                        fn (
-                            array $demand
-                        ): bool =>
-                            (float)
-                            $demand[
-                                'total_volume_m3'
-                            ]
-                            >
-                            $maxVehicleCapacity
-                            + 0.000001
-                    );
-
-            if ($oversizedDemand) {
-                throw new RuntimeException(
-                    "Demand "
-                    . "{$oversizedDemand['store_name']} "
-                    . "({$boxType}) memiliki volume "
-                    . "{$oversizedDemand['total_volume_m3']} "
-                    . 'm3, lebih besar dari kapasitas '
-                    . "vehicle {$boxType} terbesar "
-                    . "({$maxVehicleCapacity} m3)."
-                );
-            }
-
-            /*
-             * Total volume semua demand tipe ini.
-             */
-            $totalDemandVolume =
-                (float)
-                $boxDemands
-                    ->sum(
-                        'total_volume_m3'
-                    );
-
-            /*
-             * Total kapasitas vehicle tersedia.
-             */
-            $totalVehicleCapacity =
-                (float)
-                $candidateVehicles
-                    ->sum(
-                        'capacity_volume_m3'
-                    );
-
-            if (
-                $totalDemandVolume
-                >
-                $totalVehicleCapacity
-                + 0.000001
-            ) {
-                throw new RuntimeException(
-                    "Total volume Sales Order "
-                    . "{$boxType} "
-                    . "({$totalDemandVolume} m3) "
-                    . 'melebihi total kapasitas '
-                    . "vehicle {$boxType} yang "
-                    . 'tersedia '
-                    . "({$totalVehicleCapacity} m3)."
-                );
-            }
-
-            /*
-             * Estimasi batas bawah jumlah route.
-             *
-             * Ini hanya pre-check.
-             * Keputusan final tetap Python.
-             */
-            $minimumRoutesForType =
-                (int)
-                ceil(
-                    $totalDemandVolume
-                    /
-                    $maxVehicleCapacity
-                );
-
-            $minimumRoutesForType =
-                max(
-                    1,
-                    $minimumRoutesForType
-                );
-
-            if (
-                $minimumRoutesForType
-                >
-                $candidateVehicles
-                    ->count()
-            ) {
-                throw new RuntimeException(
-                    "Jumlah vehicle {$boxType} "
-                    . 'tidak cukup untuk volume '
-                    . 'Sales Order hari ini.'
-                );
-            }
-
-            $minimumRouteLowerBound +=
-                $minimumRoutesForType;
-        }
-
-        if (
-            $minimumRouteLowerBound
-            >
-            $readyDriverCount
-        ) {
-            throw new RuntimeException(
-                "Estimasi minimum membutuhkan "
-                . "{$minimumRouteLowerBound} route, "
-                . 'sedangkan driver Ready hanya '
-                . "{$readyDriverCount}."
-            );
-        }
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | DELIVERY DEMAND ID
-    |--------------------------------------------------------------------------
-    |
-    | Tidak membutuhkan table.
-    |
-    | Format:
-    |
-    | STORE_UUID::BOX_TYPE
-    |
-    | Contoh:
-    |
-    | f8e4...::dry
-    |
-    */
-
-    protected function demandIdForPackage(
-        Package $package
+    protected function resolveSourceDate(
+        mixed $value
     ): string {
-        $storeUuid =
-            $package
-                ->order
-                ?->store
-                ?->uuid;
+        if (
+            $value === null
+            || trim((string) $value) === ''
+        ) {
+            return today()->toDateString();
+        }
 
-        $boxType =
-            $this->enumValue(
-                $package->box_type
+        try {
+            return Carbon::parse(
+                (string) $value
+            )->toDateString();
+        } catch (\Throwable) {
+            throw new RuntimeException(
+                'Format source_date tidak valid.'
+            );
+        }
+    }
+
+    protected function calculateRouteDate(
+        string $sourceDate
+    ): string {
+        return Carbon::parse($sourceDate)
+            ->startOfDay()
+            ->addDays(2)
+            ->toDateString();
+    }
+
+    protected function resolveRouteDate(
+        mixed $value
+    ): string {
+        try {
+            return Carbon::parse(
+                (string) $value
+            )->toDateString();
+        } catch (\Throwable) {
+            throw new RuntimeException(
+                'Format route_date tidak valid.'
+            );
+        }
+    }
+
+    protected function resolvePlanningTime(
+        string $routeDate,
+        string $branchStartTime
+    ): array {
+        $routeDateTime = Carbon::parse($routeDate)
+            ->startOfDay();
+
+        $branchStartDateTime = $routeDateTime
+            ->copy()
+            ->setTimeFromTimeString(
+                $branchStartTime
             );
 
-        if (
-            ! $storeUuid
-            || ! $boxType
-        ) {
+        $now = now();
+
+        /*
+         * Jika route_date = hari ini, jangan menghasilkan ETA di masa lalu.
+         * Untuk historical/demo date gunakan jam operasional cabang.
+         */
+        $planningBaseTime =
+            $routeDateTime->isSameDay($now)
+            && $now->greaterThan($branchStartDateTime)
+                ? $now->copy()
+                : $branchStartDateTime->copy();
+
+        $deliveryStartDateTime = $planningBaseTime
+            ->copy()
+            ->addMinutes(
+                self::DEFAULT_ROUTE_PREPARATION_MINUTES
+            );
+
+        return [
+            'generated_at' => $now->format('Y-m-d H:i:s'),
+            'delivery_start_time' => $deliveryStartDateTime->format('H:i'),
+        ];
+    }
+
+    protected function assertNoExistingRoutes(
+        int $branchId,
+        string $routeDate,
+        bool $lock = false
+    ): void {
+        $query = DeliveryRoute::query()
+            ->where('branch_id', $branchId)
+            ->whereDate('route_date', $routeDate)
+            ->where('status', '!=', RouteStatus::Cancelled->value);
+
+        $exists = $lock
+            ? $query->lockForUpdate()->first() !== null
+            : $query->exists();
+
+        if ($exists) {
             throw new RuntimeException(
-                "Package "
-                . "{$package->tracking_number} "
-                . 'tidak dapat dibentuk '
-                . 'menjadi delivery demand.'
+                "Route branch ini untuk {$routeDate} sudah pernah dibuat. "
+                . 'Batalkan route existing terlebih dahulu jika memang ingin generate ulang.'
+            );
+        }
+    }
+
+    protected function routeDateTime(
+        string $routeDate,
+        string $time
+    ): Carbon {
+        $normalized = $this->normalizeTime($time);
+
+        if (! $normalized) {
+            throw new RuntimeException(
+                "Waktu optimizer tidak valid: {$time}"
             );
         }
 
-        return
-            $storeUuid
-            . '::'
-            . $boxType;
+        return Carbon::parse($routeDate)
+            ->startOfDay()
+            ->setTimeFromTimeString($normalized);
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | ENUM HELPER
-    |--------------------------------------------------------------------------
-    */
 
     protected function enumValue(
         mixed $value
     ): ?string {
-        if (
-            $value
-            instanceof
-            BackedEnum
-        ) {
-            return (string)
-                $value->value;
+        if ($value instanceof BackedEnum) {
+            return (string) $value->value;
         }
 
         if ($value === null) {
             return null;
         }
 
-        $value =
-            trim(
-                (string)
-                $value
-            );
+        $value = trim((string) $value);
 
-        return
-            $value !== ''
-                ? $value
-                : null;
+        return $value !== ''
+            ? $value
+            : null;
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | TIME HELPERS
-    |--------------------------------------------------------------------------
-    */
-
     protected function normalizeTime(
-        ?string $value
+        mixed $value
     ): ?string {
-        if (
-            $value === null
-            ||
-            trim($value) === ''
-        ) {
+        if ($value === null) {
+            return null;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('H:i');
+        }
+
+        $value = trim((string) $value);
+
+        if ($value === '') {
             return null;
         }
 
         if (
             ! preg_match(
-                '/^(\d{2}):(\d{2})(?::\d{2})?$/',
-                trim($value),
+                '/^(\d{1,2}):(\d{2})(?::\d{2})?$/',
+                $value,
                 $matches
             )
         ) {
@@ -2574,60 +987,39 @@ class RouteGenerationService
             );
         }
 
-        return
-            $matches[1]
-            . ':'
-            . $matches[2];
+        $hour = (int) $matches[1];
+        $minute = (int) $matches[2];
+
+        if ($hour > 23 || $minute > 59) {
+            throw new RuntimeException(
+                "Format waktu tidak valid: {$value}"
+            );
+        }
+
+        return sprintf('%02d:%02d', $hour, $minute);
     }
 
     protected function minutesBetween(
         string $start,
         string $end
     ): int {
-        [
-            $startHour,
-            $startMinute
-        ] =
-            array_map(
-                'intval',
-                explode(
-                    ':',
-                    $start
-                )
-            );
+        [$startHour, $startMinute] = array_map(
+            'intval',
+            explode(':', $start)
+        );
 
-        [
-            $endHour,
-            $endMinute
-        ] =
-            array_map(
-                'intval',
-                explode(
-                    ':',
-                    $end
-                )
-            );
+        [$endHour, $endMinute] = array_map(
+            'intval',
+            explode(':', $end)
+        );
 
-        $startMinutes =
-            $startHour * 60
-            + $startMinute;
+        $startMinutes = $startHour * 60 + $startMinute;
+        $endMinutes = $endHour * 60 + $endMinute;
 
-        $endMinutes =
-            $endHour * 60
-            + $endMinute;
-
-        if (
-            $endMinutes
-            <
-            $startMinutes
-        ) {
-            $endMinutes +=
-                24 * 60;
+        if ($endMinutes < $startMinutes) {
+            $endMinutes += 24 * 60;
         }
 
-        return
-            $endMinutes
-            -
-            $startMinutes;
+        return $endMinutes - $startMinutes;
     }
 }

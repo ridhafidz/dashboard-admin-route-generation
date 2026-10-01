@@ -14,6 +14,7 @@ class DeliveryRoute extends Model
         'driver_id',
         'vehicle_id',
         'area_id',
+        'source_date',
         'route_date',
         'status',
         'approval_status',
@@ -30,6 +31,7 @@ class DeliveryRoute extends Model
     ];
 
     protected $casts = [
+        'source_date'  => 'date',
         'route_date'   => 'date',
         'started_at'   => 'datetime',
         'completed_at' => 'datetime',
