@@ -14,6 +14,8 @@ class DeliveryStop extends Model
         'store_id',
         'source_customer_code',
         'source_so_numbers',
+        'source_dates',       // STEP 15: tanggal asli per SO (backlog-aware)
+        'box_type',
         'sequence_order',
         'predicted_arrival_time',
         'predicted_service_start_time',
@@ -27,6 +29,7 @@ class DeliveryStop extends Model
 
     protected $casts = [
         'source_so_numbers' => 'array',
+        'source_dates'      => 'array', // STEP 15: paralel dengan source_so_numbers
         'predicted_arrival_time' => 'datetime',
         'predicted_service_start_time' => 'datetime',
         'predicted_service_end_time' => 'datetime',

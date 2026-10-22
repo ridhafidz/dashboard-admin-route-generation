@@ -122,14 +122,75 @@ class RouteGenerationService
             }
         }
 
-        /*
-         * Karena source SO belum memiliki status assigned di aplikasi ini,
-         * jangan generate dua kali untuk branch + route date yang sama.
-         */
-        $this->assertNoExistingRoutes(
-            branchId: $branchId,
-            routeDate: $routeDate,
+        // Preview dan optimizer memakai filter SO yang sama. Jika semua SO
+        // sudah berada pada route aktif, tidak perlu memanggil Python.
+        $source = $this->deliverySource->build(
+            branch: $branch,
+            sourceDate: $sourceDate,
         );
+
+        $invalidItems = collect(
+            $source['invalid_items'] ?? []
+        );
+
+        $invalidSoCount = (int) (
+            $source['invalid_so_count'] ?? 0
+        );
+
+        if ($source['demands']->isEmpty()) {
+
+            if ($invalidItems->isNotEmpty()) {
+                return [
+                    'branch_id' => $branchId,
+                    'cab_id' => (string) $branch->cab_id,
+
+                    'source_date' => $sourceDate,
+                    'route_date' => $routeDate,
+
+                    'route_count' => 0,
+                    'route_uuids' => [],
+
+                    'demand_count' => 0,
+                    'assigned_demand_count' => 0,
+                    'deferred_demand_count' => 0,
+
+                    'customer_count' => 0,
+                    'order_count' => 0,
+                    'source_line_count' => 0,
+                    'item_count' => 0,
+
+                    'driver_count' => 0,
+                    'vehicle_count' => 0,
+                    'candidate_vehicle_count' => 0,
+
+                    'clusters' => [],
+                    'deferred_demands' => [],
+
+                    'invalid_items' =>
+                        $invalidItems
+                            ->values()
+                            ->all(),
+
+                    'invalid_item_count' =>
+                        $invalidItems->count(),
+
+                    'invalid_so_count' =>
+                        $invalidSoCount,
+
+                    'status' =>
+                        'NO_VALID_DEMAND',
+
+                    'message' =>
+                        "{$invalidSoCount} SO belum siap routing "
+                        . 'karena master produk/kubikasi belum lengkap.',
+                ];
+            }
+
+            throw new RuntimeException(
+                "Tidak ada SO backlog/eligible sampai {$sourceDate} "
+                . "untuk CAB ID {$branch->cab_id}."
+            );
+        }
 
         $branchStartTime =
             $this->normalizeTime(
@@ -214,20 +275,8 @@ class RouteGenerationService
         |--------------------------------------------------------------------------
         */
 
-        $source = $this->deliverySource->build(
-            branch: $branch,
-            sourceDate: $sourceDate,
-        );
-
         /** @var Collection<int, array> $demandsPayload */
         $demandsPayload = $source['demands'];
-
-        if ($demandsPayload->isEmpty()) {
-            throw new RuntimeException(
-                "Tidak ada Sales Order eligible pada {$sourceDate} untuk "
-                . "CAB ID {$branch->cab_id}."
-            );
-        }
 
         /*
          * Mirror customer ke stores. Tidak ada lagi CRUD manual store sebagai
@@ -260,13 +309,106 @@ class RouteGenerationService
 
         $vehiclesPayload = $availableVehicles
             ->map(
-                fn (Vehicle $vehicle): array => [
-                    'id' => (string) $vehicle->uuid,
-                    'plate_number' => (string) $vehicle->plate_number,
-                    'category' => $this->enumValue(
-                        $vehicle->vehicleType?->category
-                    ),
-                ]
+                function (Vehicle $vehicle): array {
+
+                    $vehicleType =
+                        $vehicle->vehicleType;
+
+                    if (! $vehicleType) {
+                        throw new RuntimeException(
+                            "Vehicle {$vehicle->plate_number} "
+                            . 'belum memiliki vehicle type.'
+                        );
+                    }
+
+                    $boxType =
+                        trim(
+                            (string)
+                            $vehicleType->box_type
+                        );
+
+                    if (
+                        ! in_array(
+                            $boxType,
+                            [
+                                'dry',
+                                'cold_storage',
+                            ],
+                            true
+                        )
+                    ) {
+                        throw new RuntimeException(
+                            "Vehicle {$vehicle->plate_number} "
+                            . 'memiliki box_type tidak valid.'
+                        );
+                    }
+
+                    $volumeM3 =
+                        (float)
+                        $vehicleType->volume_m3;
+
+                    if ($volumeM3 <= 0) {
+                        throw new RuntimeException(
+                            "Vehicle {$vehicle->plate_number} "
+                            . 'belum memiliki volume box yang valid.'
+                        );
+                    }
+
+                    $packingUtilization =
+                        (float)
+                        $vehicleType->packing_utilization;
+
+                    if (
+                        $packingUtilization <= 0
+                        ||
+                        $packingUtilization > 1
+                    ) {
+                        throw new RuntimeException(
+                            "Vehicle {$vehicle->plate_number} "
+                            . 'memiliki packing utilization tidak valid.'
+                        );
+                    }
+
+                    $volumeCm3 =
+                        $volumeM3
+                        *
+                        1_000_000;
+
+                    $usableVolumeCm3 =
+                        $volumeCm3
+                        *
+                        $packingUtilization;
+
+                    return [
+                        'id' =>
+                            (string)
+                            $vehicle->uuid,
+
+                        'plate_number' =>
+                            (string)
+                            $vehicle->plate_number,
+
+                        'category' =>
+                            $this->enumValue(
+                                $vehicleType->category
+                            ),
+
+                        'box_type' =>
+                            $boxType,
+
+                        'volume_m3' =>
+                            $volumeM3,
+
+                        'packing_utilization' =>
+                            $packingUtilization,
+
+                        'usable_volume_cm3' =>
+                            (int)
+                            round(
+                                $usableVolumeCm3
+                            ),
+                    ];
+                }
             )
             ->values();
 
@@ -342,16 +484,56 @@ class RouteGenerationService
             );
         }
 
-        if (! empty($deferredDemands)) {
+        if (! is_array($deferredDemands)) {
             throw new RuntimeException(
-                'Optimizer tidak dapat mengalokasikan seluruh customer. '
-                . 'Route generation dibatalkan agar tidak terjadi partial route.'
+                'Format deferred_demands dari ML service tidak valid.'
             );
         }
 
-        if (empty($clusters)) {
+        $deferredDemandIds = collect(
+            $deferredDemands
+        )
+            ->map(
+                function (array $item): string {
+                    $demand =
+                        $item['demand']
+                        ?? [];
+
+                    return trim(
+                        (string) (
+                            $demand['id']
+                            ?? ''
+                        )
+                    );
+                }
+            )
+            ->filter(
+                fn (string $id): bool =>
+                    $id !== ''
+            )
+            ->values();
+        
+        if (
+            $deferredDemandIds->count()
+            !==
+            $deferredDemandIds
+                ->unique()
+                ->count()
+        ) {
             throw new RuntimeException(
-                'ML service tidak mengembalikan hasil cluster.'
+                'Optimizer mengembalikan deferred demand '
+                . 'yang sama lebih dari satu kali.'
+            );
+        }
+
+        if (
+            empty($clusters)
+            &&
+            empty($deferredDemands)
+        ) {
+            throw new RuntimeException(
+                'ML service tidak mengembalikan '
+                . 'route maupun deferred demand.'
             );
         }
 
@@ -440,7 +622,22 @@ class RouteGenerationService
             ->values()
             ->all();
 
+        $unknownDeferredDemandId = $deferredDemandIds
+            ->first(fn (string $id): bool => ! $demandById->has($id));
+
+        if ($unknownDeferredDemandId) {
+            throw new RuntimeException(
+                "Deferred demand {$unknownDeferredDemandId} "
+                . 'tidak ditemukan pada source snapshot.'
+            );
+        }
+
         $sourceFingerprint = (string) $source['fingerprint'];
+
+        $deferredDemandIdsArray = $deferredDemandIds
+            ->sort()
+            ->values()
+            ->all();
 
         /*
         |--------------------------------------------------------------------------
@@ -462,18 +659,18 @@ class RouteGenerationService
                 $selectedVehicleIds,
                 $storeIdsSnapshot,
                 $demandById,
+                $deferredDemands,
+                $deferredDemandIdsArray,
                 $expectedDemandIds,
                 $sourceFingerprint,
                 $source
             ): array {
-                /*
-                 * Race guard: jangan ada generate paralel untuk branch/date sama.
-                 */
-                $this->assertNoExistingRoutes(
-                    branchId: $branchId,
-                    routeDate: $routeDate,
-                    lock: true,
-                );
+                // Serialisasi generate cabang ini. Re-read source di bawah
+                // akan menolak hasil optimasi lama jika SO keburu dialokasikan.
+                Branch::query()
+                    ->whereKey($branchId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
 
                 $lockedDrivers = Driver::query()
                     ->whereIn('id', $driverIdsSnapshot)
@@ -566,6 +763,17 @@ class RouteGenerationService
                         'Mirror customer berubah saat optimasi berlangsung.'
                     );
                 }
+
+                // Tahan route lama saat snapshot alokasi dibaca ulang.
+                // Takeout/Cancel/Reschedule yang mengunci route menunggu
+                // transaksi ini selesai, sehingga daftar SO tidak berubah
+                // di antara pemeriksaan dan pembuatan route baru.
+                DeliveryRoute::query()
+                    ->where('branch_id', $branchId)
+                    ->whereDate('source_date', $sourceDate)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
 
                 /*
                  * Re-read source setelah proses Python. Jika database source
@@ -731,6 +939,26 @@ class RouteGenerationService
                         }
 
                         $customerId = (string) $demand['customer_id'];
+                        $boxType =
+                            trim(
+                                (string) ($demand['box_type'] ?? '')
+                            );
+
+                        if (
+                            ! in_array(
+                                $boxType,
+                                [
+                                    'dry',
+                                    'cold_storage',
+                                ],
+                                true
+                            )
+                        ) {
+                            throw new RuntimeException(
+                                "Demand {$demandId} memiliki box_type tidak valid."
+                            );
+                        }
+
                         $store = $lockedStores->get($customerId);
 
                         if (! $store) {
@@ -740,11 +968,14 @@ class RouteGenerationService
                         }
 
                         DeliveryStop::create([
-                            'delivery_route_id' => $route->id,
-                            'store_id' => $store->id,
+                            'delivery_route_id'   => $route->id,
+                            'store_id'            => $store->id,
                             'source_customer_code' => $customerId,
-                            'source_so_numbers' => $demand['so_numbers'] ?? [],
-                            'sequence_order' => (int) $stopData['sequence'],
+                            'source_so_numbers'   => $demand['so_numbers'] ?? [],
+                            // STEP 16: simpan tanggal asli per SO (backlog multi-tanggal)
+                            'source_dates'        => $demand['source_dates'] ?? [],
+                            'box_type'            => $boxType,
+                            'sequence_order'      => (int) $stopData['sequence'],
                             'predicted_arrival_time' => $this->routeDateTime(
                                 $routeDate,
                                 (string) $stopData['arrival_time']
@@ -771,18 +1002,71 @@ class RouteGenerationService
 
                 sort($assignedDemandIds);
 
-                if ($assignedDemandIds !== $expectedDemandIds) {
+                $overlapDemandIds = array_values(
+                    array_intersect($assignedDemandIds, $deferredDemandIdsArray)
+                );
+
+                if (! empty($overlapDemandIds)) {
                     throw new RuntimeException(
-                        'Tidak seluruh customer demand ter-assign ke route. '
-                        . 'Seluruh perubahan dibatalkan.'
+                        'Demand terdeteksi sebagai assigned sekaligus deferred: '
+                        . implode(', ', $overlapDemandIds)
+                    );
+                }
+
+                $resolvedDemandIds = array_values(
+                    array_unique(
+                        array_merge(
+                            $assignedDemandIds,
+                            $deferredDemandIdsArray
+                        )
+                    )
+                );
+
+                sort($resolvedDemandIds);
+
+                if ($resolvedDemandIds !== $expectedDemandIds) {
+                    $missingDemandIds = array_values(
+                        array_diff(
+                            $expectedDemandIds,
+                            $resolvedDemandIds
+                        )
+                    );
+
+                    throw new RuntimeException(
+                        'Optimizer tidak memberikan hasil untuk seluruh demand.'
+                        . (
+                            ! empty($missingDemandIds)
+                            ? ' Demand hilang: '
+                                . implode(', ', $missingDemandIds)
+                            : ''
+                        )
                     );
                 }
 
                 return [
-                    'route_count' => count($routeUuids),
-                    'route_uuids' => $routeUuids,
-                    'item_count' => $assignedItemCount,
-                    'demand_count' => count($assignedDemandIds),
+                    'route_count' =>
+                        count($routeUuids),
+
+                    'route_uuids' =>
+                        $routeUuids,
+
+                    'item_count' =>
+                        $assignedItemCount,
+
+                    'assigned_demand_count' =>
+                        count(
+                            $assignedDemandIds
+                        ),
+
+                    'deferred_demand_count' =>
+                        count(
+                            $deferredDemandIdsArray
+                        ),
+
+                    'demand_count' =>
+                        count(
+                            $assignedDemandIds
+                        ),
                 ];
             }
         );
@@ -815,8 +1099,16 @@ class RouteGenerationService
             'clustering_summary' => $response->json(
                 'clustering_summary'
             ),
+            'assigned_demand_count' => $persisted['assigned_demand_count'],
+            'deferred_demand_count' => $persisted['deferred_demand_count'],
+
             'clusters' => $clusters,
-            'deferred_demands' => [],
+
+            'deferred_demands' => $deferredDemands,
+            'invalid_items' => $invalidItems->values()->all(),
+            'invalid_item_count' => $invalidItems->count(),
+
+            'invalid_so_count' => $invalidSoCount,
         ];
     }
 
@@ -899,28 +1191,6 @@ class RouteGenerationService
             'generated_at' => $now->format('Y-m-d H:i:s'),
             'delivery_start_time' => $deliveryStartDateTime->format('H:i'),
         ];
-    }
-
-    protected function assertNoExistingRoutes(
-        int $branchId,
-        string $routeDate,
-        bool $lock = false
-    ): void {
-        $query = DeliveryRoute::query()
-            ->where('branch_id', $branchId)
-            ->whereDate('route_date', $routeDate)
-            ->where('status', '!=', RouteStatus::Cancelled->value);
-
-        $exists = $lock
-            ? $query->lockForUpdate()->first() !== null
-            : $query->exists();
-
-        if ($exists) {
-            throw new RuntimeException(
-                "Route branch ini untuk {$routeDate} sudah pernah dibuat. "
-                . 'Batalkan route existing terlebih dahulu jika memang ingin generate ulang.'
-            );
-        }
     }
 
     protected function routeDateTime(

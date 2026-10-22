@@ -3,7 +3,6 @@
 namespace App\Filament\Resources\DeliveryRoutes;
 
 use App\Filament\Resources\DeliveryRoutes\Pages\ListDeliveryRoutes;
-use App\Filament\Resources\DeliveryRoutes\Pages\ViewDeliveryRoute;
 use App\Filament\Resources\DeliveryRoutes\Tables\DeliveryRoutesTable;
 use App\Models\DeliveryRoute;
 use App\Services\BranchContext;
@@ -48,11 +47,6 @@ class DeliveryRouteResource extends Resource
         return [
             'index' =>
                 ListDeliveryRoutes::route('/'),
-
-            'view' =>
-                ViewDeliveryRoute::route(
-                    '/{record}'
-                ),
         ];
     }
 

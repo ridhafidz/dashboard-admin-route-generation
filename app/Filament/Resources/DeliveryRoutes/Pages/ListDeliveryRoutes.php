@@ -25,6 +25,7 @@ use Filament\Resources\Pages\ListRecords;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
 
 class ListDeliveryRoutes extends ListRecords
 {
@@ -35,7 +36,9 @@ class ListDeliveryRoutes extends ListRecords
 
     public ?string $mapDate = null;
     public int $mapRevision = 0;
-
+    public array $deferredDemands = [];
+    public array $invalidItems = [];
+    public int $invalidSoCount = 0;
     public ?int $manualRerouteStopId = null;
     public ?string $manualRerouteStoreName = null;
     public ?int $manualRerouteSourceRouteId = null;
@@ -120,8 +123,8 @@ class ListDeliveryRoutes extends ListRecords
 
                     Section::make('Preview')
                         ->description(
-                            'Preview Sales Order pada tanggal yang dipilih dan resource '
-                            . 'untuk jadwal pengiriman H+2.'
+                            'SO/customer yang belum dialokasikan ke route aktif '
+                            . 'dan resource tersedia untuk jadwal pengiriman H+2.'
                         )
                         ->schema([
                             TextEntry::make('route_date_preview')
@@ -140,7 +143,7 @@ class ListDeliveryRoutes extends ListRecords
                                 ->color('gray'),
 
                             TextEntry::make('so_count')
-                                ->label('Total SO')
+                                ->label('SO Belum Dialokasikan')
                                 ->state(function (Get $get) {
                                     $preview = $this->getRoutePreview(
                                         (int) ($get('branch_id') ?? 0),
@@ -153,7 +156,7 @@ class ListDeliveryRoutes extends ListRecords
                                 ->color('warning'),
 
                             TextEntry::make('customer_count')
-                                ->label('Total Customer')
+                                ->label('Customer Belum Dialokasikan')
                                 ->state(function (Get $get) {
                                     $preview = $this->getRoutePreview(
                                         (int) ($get('branch_id') ?? 0),
@@ -166,7 +169,7 @@ class ListDeliveryRoutes extends ListRecords
                                 ->color('success'),
 
                             TextEntry::make('driver_count')
-                                ->label('Driver Ready')
+                                ->label('Driver Ready Tersedia')
                                 ->state(function (Get $get) {
                                     $preview = $this->getRoutePreview(
                                         (int) ($get('branch_id') ?? 0),
@@ -179,7 +182,7 @@ class ListDeliveryRoutes extends ListRecords
                                 ->color('info'),
 
                             TextEntry::make('vehicle_count')
-                                ->label('Vehicle Active')
+                                ->label('Vehicle Active Tersedia')
                                 ->state(function (Get $get) {
                                     $preview = $this->getRoutePreview(
                                         (int) ($get('branch_id') ?? 0),
@@ -253,90 +256,161 @@ class ListDeliveryRoutes extends ListRecords
 
                         $deferredCount = $deferredDemands->count();
 
-                        if ($routeCount > 0 && $deferredCount === 0) {
-                            Notification::make()
-                                ->title('Generate Route Berhasil')
-                                ->body(
-                                    "SO masuk {$this->formatDate($sourceDate)}: "
-                                    . "{$preview['sales_orders']} SO, "
-                                    . "{$preview['customers']} customer. "
-                                    . "Berhasil membuat {$routeCount} route untuk "
-                                    . "jadwal {$this->formatDate($routeDate)}."
-                                )
-                                ->success()
-                                ->send();
+                        $invalidItems = collect(
+                            $result['invalid_items'] ?? []
+                        );
 
-                        } elseif ($routeCount > 0 && $deferredCount > 0) {
-                            $reasonGroups = $deferredDemands->groupBy(
-                                fn (array $item) => $item['reason'] ?? 'unknown'
-                            );
+                        $invalidItemCount = $invalidItems->count();
 
-                            $messages = [];
+                        $this->invalidSoCount = (int) (
+                            $result['invalid_so_count'] ?? 0
+                        );
 
-                            foreach ($reasonGroups as $reason => $items) {
-                                $count = $items->count();
+                        $this->invalidItems = $invalidItems
+                            ->map(function (array $item): array {
+                                return [
+                                    'customer_id' => (string) ($item['customer_id'] ?? ''),
+                                    'customer_name' => (string) ($item['customer_name'] ?? '-'),
+                                    'so_number' => (string) ($item['so_number'] ?? '-'),
+                                    'source_date' => (string) ($item['source_date'] ?? ''),
+                                    'product_code' => (string) ($item['product_code'] ?? '-'),
+                                    'product_name' => (string) ($item['product_name'] ?? '-'),
+                                    'reason' => (string) ($item['reason'] ?? 'UNKNOWN'),
+                                    'message' => (string) ($item['message'] ?? '-'),
+                                ];
+                            })
+                            ->values()
+                            ->all();
 
-                                $messages[] = match ($reason) {
-                                    'insufficient_route_slots' =>
-                                        "{$count} demand tertunda karena slot route dari Driver Ready/Vehicle Active tidak mencukupi.",
+                        $this->deferredDemands = $deferredDemands 
+                            ->map(function (array $item): array {
+                                $demand = $item['demand'] ?? [];
 
-                                    'no_available_driver',
-                                    'insufficient_driver' =>
-                                        "{$count} demand tertunda karena Driver Ready tidak tersedia.",
+                                return [
+                                    'id' => (string) ($demand['id'] ?? ''),
+                                    'customer_id' => (string) ($demand['customer_id'] ?? ''),
+                                    'customer_name' => (string) ($demand['customer_name'] ?? '-'),
+                                    'box_type' => (string) ($demand['box_type'] ?? '-'),
+                                    'demand_volume_cm3' => (float) ($demand['demand_volume_cm3'] ?? 0),
+                                    'so_numbers' => $demand['so_numbers'] ?? [],
+                                    'reason' => (string) ($item['reason'] ?? 'UNKNOWN'),
+                                ];
+                            })
+                            ->values()
+                            ->all();
 
-                                    'no_available_vehicle',
-                                    'insufficient_vehicle' =>
-                                        "{$count} demand tertunda karena Vehicle Active tidak tersedia.",
+                        if ($deferredCount === 0) {
+                            $this->deferredDemands = [];
+                        }
 
-                                    'invalid_coordinate',
-                                    'missing_coordinate' =>
-                                        "{$count} demand tertunda karena koordinat customer tidak valid atau tidak tersedia.",
+                        if ($routeCount > 0) {
 
-                                    default =>
-                                        "{$count} demand belum dapat dialokasikan ({$reason}).",
-                                };
+                            $notes = [];
+
+                            if ($deferredCount > 0) {
+                                $reasonGroups = $deferredDemands->groupBy(
+                                    fn (array $item) =>
+                                        $item['reason'] ?? 'UNKNOWN'
+                                );
+
+                                foreach ($reasonGroups as $reason => $items) {
+                                    $count = $items->count();
+
+                                    $notes[] = match ($reason) {
+                                        'CAPACITY_FULL' =>
+                                            "{$count} demand tertunda karena kapasitas kendaraan kompatibel sudah penuh.",
+
+                                        'NO_COMPATIBLE_VEHICLE' =>
+                                            "{$count} demand tertunda karena tidak ada kendaraan dengan box type yang sesuai.",
+
+                                        'UNASSIGNABLE_CAPACITY' =>
+                                            "{$count} demand tertunda karena volume demand melebihi kapasitas kendaraan kompatibel.",
+
+                                        'insufficient_route_slots' =>
+                                            "{$count} demand tertunda karena slot route tidak mencukupi.",
+
+                                        'no_available_driver',
+                                        'insufficient_driver' =>
+                                            "{$count} demand tertunda karena Driver Ready tidak tersedia.",
+
+                                        'no_available_vehicle',
+                                        'insufficient_vehicle' =>
+                                            "{$count} demand tertunda karena Vehicle Active tidak tersedia.",
+
+                                        'invalid_coordinate',
+                                        'missing_coordinate' =>
+                                            "{$count} demand tertunda karena koordinat customer belum valid.",
+
+                                        default =>
+                                            "{$count} demand belum teralokasi ({$reason}).",
+                                    };
+                                }
                             }
 
-                            Notification::make()
-                                ->title('Route Dibuat Sebagian')
+                            if ($invalidItemCount > 0) {
+                                $notes[] =
+                                    "{$this->invalidSoCount} SO disisihkan karena master produk/kubikasi belum lengkap.";
+                            }
+
+                            $hasWarning =
+                                $deferredCount > 0
+                                || $invalidItemCount > 0;
+
+                            $notification = Notification::make()
+                                ->title(
+                                    $hasWarning
+                                        ? 'Route Berhasil Dibuat dengan Catatan'
+                                        : 'Generate Route Berhasil'
+                                )
                                 ->body(
-                                    "SO masuk {$this->formatDate($sourceDate)}: "
-                                    . "{$preview['sales_orders']} SO, "
-                                    . "{$preview['customers']} customer. "
-                                    . "Berhasil membuat {$routeCount} route untuk "
-                                    . "{$this->formatDate($routeDate)}. "
-                                    . "{$deferredCount} delivery demand belum teralokasi. "
-                                    . implode(' ', $messages)
+                                    "Berhasil membuat {$routeCount} route untuk "
+                                    . "jadwal {$this->formatDate($routeDate)}."
+                                    . (
+                                        ! empty($notes)
+                                            ? ' ' . implode(' ', $notes)
+                                            : ''
+                                    )
+                                );
+
+                            if ($hasWarning) {
+                                $notification
+                                    ->warning()
+                                    ->persistent();
+                            } else {
+                                $notification->success();
+                            }
+
+                            $notification->send();
+                        } elseif ($invalidItemCount > 0) {
+
+                            Notification::make()
+                                ->title('Belum Ada SO Valid untuk Routing')
+                                ->body(
+                                    "{$this->invalidSoCount} SO belum siap routing "
+                                    . 'karena master produk/kubikasi belum lengkap.'
+                                )
+                                ->warning()
+                                ->persistent()
+                                ->send();
+
+                        } elseif ($deferredCount > 0) {
+
+                            Notification::make()
+                                ->title('Demand Belum Dapat Dialokasikan')
+                                ->body(
+                                    "{$deferredCount} demand belum berhasil dimasukkan ke route."
                                 )
                                 ->warning()
                                 ->persistent()
                                 ->send();
 
                         } else {
-                            if ($preview['sales_orders'] <= 0) {
-                                $message =
-                                    "Tidak ada Sales Order tanggal {$this->formatDate($sourceDate)} "
-                                    . 'untuk cabang yang dipilih.';
-                            } elseif (
-                                $preview['drivers'] <= 0
-                                || $preview['vehicles'] <= 0
-                            ) {
-                                $message =
-                                    "Ditemukan {$preview['sales_orders']} SO dan "
-                                    . "{$preview['customers']} customer. "
-                                    . "Untuk route {$this->formatDate($routeDate)}, "
-                                    . "Driver Ready: {$preview['drivers']}, "
-                                    . "Vehicle Active: {$preview['vehicles']}.";
-                            } else {
-                                $message =
-                                    "Ditemukan {$preview['sales_orders']} SO dan "
-                                    . "{$preview['customers']} customer, tetapi optimizer "
-                                    . 'belum menghasilkan route.';
-                            }
 
                             Notification::make()
                                 ->title('Route Belum Dapat Dibuat')
-                                ->body($message)
+                                ->body(
+                                    'Tidak ada demand valid yang berhasil dibuat menjadi route.'
+                                )
                                 ->danger()
                                 ->persistent()
                                 ->send();
@@ -462,17 +536,10 @@ class ListDeliveryRoutes extends ListRecords
         $service = app(RouteControlTowerService::class);
 
         return [
-            'controlTowerData'           => $service->build($this->mapDate),
-            'routeDateOptions'           => $service->availableDates(),
-            'googleMapsBrowserKey'       => config('services.google_maps.browser_key'),
-            'googleMapsMapId'            => config('services.google_maps.map_id', 'DEMO_MAP_ID'),
-
-            // Manual Reroute state — exposed to Blade as $variables
-            'manualRerouteStopId'        => $this->manualRerouteStopId,
-            'manualRerouteStoreName'     => $this->manualRerouteStoreName,
-            'manualRerouteSourceRouteId' => $this->manualRerouteSourceRouteId,
-            'manualRerouteTargets'       => $this->manualRerouteTargets,
-            'manualRerouteError'         => $this->manualRerouteError,
+            'controlTowerData' => $service->build($this->mapDate),
+            'routeDateOptions' => $service->availableDates(),
+            'googleMapsBrowserKey' => config('services.google_maps.browser_key'),
+            'googleMapsMapId' => config('services.google_maps.map_id', 'DEMO_MAP_ID'),
         ];
     }
 
@@ -538,11 +605,17 @@ class ListDeliveryRoutes extends ListRecords
             $result = app(RouteControlTowerActionService::class)
                 ->manualRerouteTargets($stopId);
 
-            $this->manualRerouteStoreName = $result['store_name'] ?? '-';
-            $this->manualRerouteSourceRouteId = isset($result['source_route']['id'])
+            $this->manualRerouteStoreName =
+                $result['store_name'] ?? '-';
+
+            $this->manualRerouteSourceRouteId = isset(
+                $result['source_route']['id']
+            )
                 ? (int) $result['source_route']['id']
                 : null;
-            $this->manualRerouteTargets = $result['targets'] ?? [];
+
+            $this->manualRerouteTargets =
+                $result['targets'] ?? [];
         } catch (\Throwable $e) {
             $this->manualRerouteError = $e->getMessage();
         }
@@ -556,10 +629,13 @@ class ListDeliveryRoutes extends ListRecords
 
         try {
             $result = app(RouteControlTowerActionService::class)
-                ->manualReroute($this->manualRerouteStopId, $targetRouteId);
+                ->manualReroute(
+                    $this->manualRerouteStopId,
+                    $targetRouteId
+                );
 
             $sequence = $result['new_sequence'] ?? '-';
-            $arrival  = $result['new_arrival_time'] ?? '-';
+            $arrival = $result['new_arrival_time'] ?? '-';
 
             Notification::make()
                 ->title('Manual Rerouting berhasil')
@@ -594,6 +670,105 @@ class ListDeliveryRoutes extends ListRecords
         }
     }
 
+    public function approveRoute(int $routeId): void
+    {
+        try {
+            DB::transaction(function () use ($routeId): void {
+                $route = DeliveryRoute::query()
+                    ->whereKey($routeId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                $status = $route->status instanceof \BackedEnum
+                    ? $route->status->value
+                    : (string) $route->status;
+
+                if ($status !== 'planned') {
+                        throw new \RuntimeException(
+                            'Hanya route Planned yang dapat di-approve.'
+                        );
+                }
+
+                if ($route->approval_status !== 'pending') {
+                    throw new \RuntimeException(
+                        'Route ini sudah diproses approval.'
+                    );
+                }
+
+                $route->forceFill([
+                    'approval_status' => 'approved',
+                    'approved_at' => now(),
+                    'approved_by' => auth()->id(),
+                ])->save();
+            });
+
+            Notification::make()
+                ->title('Route Berhasil Di-approve')
+                ->body("Route #{$routeId} sekarang tersedia untuk Driver.")
+                ->success()
+                ->send();
+
+            $this->mapRevision++;
+
+        } catch (\Throwable $e) {
+            Notification::make()
+                ->title('Approve Route gagal')
+                ->body($e->getMessage())
+                ->danger()
+                ->persistent()
+                ->send();
+            }
+    }
+
+    public function cancelRoute(int $routeId): void
+    {
+        try {
+            DB::transaction(function () use ($routeId): void {
+                $route = DeliveryRoute::query()
+                    ->whereKey($routeId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                $status = $route->status instanceof \BackedEnum
+                    ? $route->status->value
+                    : (string) $route->status;
+
+                if ($status !== 'planned') {
+                    throw new \RuntimeException(
+                        'Hanya route Planned yang dapat dibatalkan.'
+                    );
+                }
+
+                if ($route->approval_status !== 'pending') {
+                    throw new \RuntimeException(
+                        'Route yang sudah di-approve tidak dapat langsung dibatalkan.'
+                    );
+                }
+
+                $route->forceFill([
+                    'status' => RouteStatus::Cancelled->value,
+                ])->save();
+            });
+
+            Notification::make()
+                ->title('Route Dibatalkan')
+                ->body("Route #{$routeId} berhasil dibatalkan.")
+                ->success()
+                ->send();
+
+            $this->mapRevision++;
+
+        } catch (\Throwable $e) {
+            Notification::make()
+                ->title('Cancel Route gagal')
+                ->body($e->getMessage())
+                ->danger()
+                ->persistent()
+                ->send();
+        }
+    }
+
+
     /**
      * Aturan bisnis jadwal delivery: H+2 dari tanggal SO masuk.
      *
@@ -625,4 +800,6 @@ class ListDeliveryRoutes extends ListRecords
             'estimated_generate_time' => '-',
         ];
     }
+
+    
 }

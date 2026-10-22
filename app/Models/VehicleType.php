@@ -2,42 +2,53 @@
 
 namespace App\Models;
 
-use App\Enums\BoxType;
-use App\Enums\VehicleCategory;
-use App\Models\Concerns\HasUuid;
 use Illuminate\Database\Eloquent\Model;
 
 class VehicleType extends Model
 {
-    use HasUuid;
-
-    protected $fillable = [
-        'category',
-        'box_type',
-        'length_cm',
-        'width_cm',
-        'height_cm',
-    ];
+    protected $table = 'vehicle_types';
 
     protected $casts = [
-        'category' => VehicleCategory::class,
-        'box_type' => BoxType::class,
+        'length_cm' => 'float',
+        'width_cm' => 'float',
+        'height_cm' => 'float',
+
+        'volume_m3' => 'float',
+
+        'packing_utilization' => 'float',
+
+        'capacity_weight_kg' => 'float',
     ];
 
-    protected static function booted(): void
+    public function getCalculatedVolumeM3Attribute(): float
     {
-        static::saving(function (VehicleType $vehicleType) {
-            if ($vehicleType->length_cm && $vehicleType->width_cm && $vehicleType->height_cm) {
-                $vehicleType->volume_m3 = round(
-                    ($vehicleType->length_cm * $vehicleType->width_cm * $vehicleType->height_cm) / 1_000_000,
-                    3
-                );
-            }
-        });
+        if (
+            ! $this->length_cm
+            || ! $this->width_cm
+            || ! $this->height_cm
+        ) {
+            return 0;
+        }
+
+        return (
+            (float) $this->length_cm
+            *
+            (float) $this->width_cm
+            *
+            (float) $this->height_cm
+        ) / 1_000_000;
     }
 
-    public function vehicles()
+    public function getUsableVolumeM3Attribute(): float
     {
-        return $this->hasMany(Vehicle::class);
+        $utilization =
+            $this->packing_utilization > 0
+                ? $this->packing_utilization
+                : 1;
+
+        return
+            $this->calculated_volume_m3
+            *
+            $utilization;
     }
 }

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Enums\DeliveryStopStatus;
 use App\Http\Controllers\Api\Concerns\DriverApiSupport;
+use App\Models\DriverLocation;
 use App\Http\Controllers\Controller;
 use App\Models\DeliveryLog;
 use App\Models\DeliveryRoute;
@@ -425,6 +426,34 @@ class DriverRouteController extends Controller
             }
         );
 
+        DriverLocation::create([
+            'driver_id' =>
+                $driver->id,
+
+            'delivery_route_id' =>
+                $route->id,
+
+            'latitude' =>
+                (float)
+                $validated['latitude'],
+
+            'longitude' =>
+                (float)
+                $validated['longitude'],
+
+            'accuracy' =>
+                null,
+
+            'speed' =>
+                null,
+
+            'heading' =>
+                null,
+
+            'recorded_at' =>
+                now(),
+        ]);
+
 
         return response()->json([
             'success' => true,
@@ -453,17 +482,63 @@ class DriverRouteController extends Controller
         Request $request,
         string $routeUuid
     ): JsonResponse {
-        $validated =
-            $this->validateLocation(
-                $request
-            );
 
+    /*
+    |--------------------------------------------------------------------------
+    | VALIDASI GPS
+    |--------------------------------------------------------------------------
+    */
+
+        $validated =
+            $request->validate([
+
+                'latitude' => [
+                    'required',
+                    'numeric',
+                    'between:-90,90',
+                ],
+
+                'longitude' => [
+                    'required',
+                    'numeric',
+                    'between:-180,180',
+                ],
+
+                'accuracy' => [
+                    'nullable',
+                    'numeric',
+                    'min:0',
+                ],
+
+                'speed' => [
+                    'nullable',
+                    'numeric',
+                    'min:0',
+                ],
+
+                'heading' => [
+                    'nullable',
+                    'numeric',
+                    'between:0,360',
+                ],
+            ]);
+
+    /*
+    |--------------------------------------------------------------------------
+    | DRIVER LOGIN
+    |--------------------------------------------------------------------------
+    */
 
         $driver =
             $this->resolveDriver(
                 $request
             );
 
+    /*
+    |--------------------------------------------------------------------------
+    | ROUTE MILIK DRIVER
+    |--------------------------------------------------------------------------
+    */
 
         $route =
             $this->findDriverRoute(
@@ -471,6 +546,33 @@ class DriverRouteController extends Controller
                 $routeUuid
             );
 
+    /*
+    |--------------------------------------------------------------------------
+    | HARUS APPROVED
+    |--------------------------------------------------------------------------
+    */
+
+        if (
+            $route->approval_status
+            !==
+            'approved'
+        ) {
+
+            return response()->json([
+                'success' =>
+                    false,
+
+                'message' =>
+                    'Route belum di-approve.',
+            ], 422);
+        }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | HARUS ONGOING
+    |--------------------------------------------------------------------------
+    */
 
         if (
             $this->enumValue(
@@ -479,118 +581,141 @@ class DriverRouteController extends Controller
             !==
             'ongoing'
         ) {
+
             return response()->json([
-                'success' => false,
+                'success' =>
+                    false,
 
                 'message' =>
                     'GPS hanya diterima ketika route Ongoing.',
             ], 422);
         }
 
+    /*
+    |--------------------------------------------------------------------------
+    | SIMPAN POSISI
+    |--------------------------------------------------------------------------
+    */
 
-        /*
-        |--------------------------------------------------------------------------
-        | DATABASE THROTTLE
-        |--------------------------------------------------------------------------
-        |
-        | Maksimal satu gps_ping setiap 15 detik.
-        |--------------------------------------------------------------------------
-        */
+        $location =
+            DriverLocation::create([
 
-        $lastPing =
-            DeliveryLog::query()
-                ->where(
-                    'delivery_route_id',
-                    $route->id
-                )
-                ->where(
-                    'event_type',
-                    'gps_ping'
-                )
-                ->latest(
-                    'recorded_at'
-                )
-                ->first();
+                'driver_id' =>
+                    $driver->id,
 
+                'delivery_route_id' =>
+                    $route->id,
 
-        if ($lastPing) {
-            $lastTime =
-                Carbon::parse(
-                    $lastPing->recorded_at
-                );
-
-            if (
-                $lastTime
-                    ->diffInSeconds(
-                        now()
-                    )
-                < 15
-            ) {
-                return response()->json([
-                    'success' =>
-                        true,
-
-                    'stored' =>
-                        false,
-
-                    'message' =>
-                        'GPS diterima. Belum disimpan karena interval kurang dari 15 detik.',
-                ]);
-            }
-        }
-
-
-        $log =
-            $this->createDeliveryLog(
-                route:
-                    $route,
-
-                stop:
-                    null,
-
-                eventType:
-                    'gps_ping',
-
-                latitude:
+                'latitude' =>
                     (float)
                     $validated[
                         'latitude'
                     ],
 
-                longitude:
+                'longitude' =>
                     (float)
                     $validated[
                         'longitude'
                     ],
-            );
 
+                'accuracy' =>
+                    isset(
+                        $validated[
+                            'accuracy'
+                        ]
+                    )
+                        ? (float)
+                            $validated[
+                                'accuracy'
+                            ]
+                        : null,
+
+                'speed' =>
+                    isset(
+                        $validated[
+                            'speed'
+                        ]
+                    )
+                        ? (float)
+                            $validated[
+                                'speed'
+                            ]
+                        : null,
+
+                'heading' =>
+                    isset(
+                        $validated[
+                            'heading'
+                        ]
+                    )
+                        ? (float)
+                            $validated[
+                                'heading'
+                            ]
+                        : null,
+
+                'recorded_at' =>
+                    now(),
+            ]);
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | RESPONSE
+    |--------------------------------------------------------------------------
+    */
 
         return response()->json([
+
             'success' =>
                 true,
 
             'stored' =>
                 true,
 
+            'message' =>
+                'Lokasi driver berhasil diperbarui.',
+
             'data' => [
+
+                'route_uuid' =>
+                    $route->uuid,
+
                 'latitude' =>
                     (float)
-                    $log->latitude,
+                    $location->latitude,
 
                 'longitude' =>
                     (float)
-                    $log->longitude,
+                    $location->longitude,
+
+                'accuracy' =>
+                    $location->accuracy !== null
+                        ? (float)
+                            $location->accuracy
+                        : null,
+
+                'speed' =>
+                    $location->speed !== null
+                        ? (float)
+                            $location->speed
+                        : null,
+
+                'heading' =>
+                    $location->heading !== null
+                        ? (float)
+                            $location->heading
+                        : null,
 
                 'recorded_at' =>
-                    Carbon::parse(
-                        $log->recorded_at
-                    )->format(
-                        'Y-m-d H:i:s'
-                    ),
+                    $location
+                        ->recorded_at
+                        ?->format(
+                            'Y-m-d H:i:s'
+                        ),
             ],
         ]);
     }
-
 
     /*
     |--------------------------------------------------------------------------

@@ -2,48 +2,70 @@
 
 namespace App\Models;
 
-use App\Enums\BoxType;
-use App\Enums\ProductStatus;
-use App\Models\Concerns\HasUuid;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Product extends Model
 {
-    use HasUuid;
-
-    protected $fillable = [
-        'code',
-        'name',
-        'box_type',
-        'units_per_carton',
-        'unit_weight_kg',
-        'carton_weight_kg',
-        'unit_volume_m3',
-        'carton_volume_m3',
-        'unit_price',
-        'carton_price',
-        'status',
-    ];
+    protected $table = 'products';
 
     protected $casts = [
-        'box_type' => BoxType::class,
-        'status' => ProductStatus::class,
+        'carton_length_cm' => 'float',
+        'carton_width_cm' => 'float',
+        'carton_height_cm' => 'float',
 
         'units_per_carton' => 'integer',
+        'units_per_pack' => 'integer',
 
-        'unit_weight_kg' => 'decimal:4',
-        'carton_weight_kg' => 'decimal:4',
-
-        'unit_volume_m3' => 'decimal:8',
-        'carton_volume_m3' => 'decimal:6',
-
-        'unit_price' => 'decimal:2',
-        'carton_price' => 'decimal:2',
+        'unit_volume_cm3' => 'float',
+        'carton_volume_cm3' => 'float',
     ];
 
-    public function packages(): HasMany
+    public function getCalculatedCartonVolumeM3Attribute(): float
     {
-        return $this->hasMany(Package::class);
+        if (
+            ! $this->carton_length_cm
+            || ! $this->carton_width_cm
+            || ! $this->carton_height_cm
+        ) {
+            return 0;
+        }
+
+        return (
+            (float) $this->carton_length_cm
+            *
+            (float) $this->carton_width_cm
+            *
+            (float) $this->carton_height_cm
+        ) / 1_000_000;
+    }
+
+    public function getCalculatedUnitVolumeM3Attribute(): float
+    {
+        if (
+            ! $this->units_per_carton
+            || $this->units_per_carton <= 0
+        ) {
+            return 0;
+        }
+
+        return
+            $this->calculated_carton_volume_m3
+            /
+            $this->units_per_carton;
+    }
+
+    public function getPackVolumeM3Attribute(): float
+    {
+        if (
+            ! $this->units_per_pack
+            || $this->units_per_pack <= 0
+        ) {
+            return 0;
+        }
+
+        return
+            $this->calculated_unit_volume_m3
+            *
+            $this->units_per_pack;
     }
 }

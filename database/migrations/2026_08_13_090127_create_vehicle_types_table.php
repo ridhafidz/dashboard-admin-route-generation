@@ -19,8 +19,8 @@ return new class extends Migration
             $table->decimal('length_cm', 8, 2);
             $table->decimal('width_cm', 8, 2);
             $table->decimal('height_cm', 8, 2);
-            $table->decimal('volume_m3', 10, 3)
-                ->nullable();
+            $table->decimal('volume_m3', 10, 3)->nullable();
+            $table->decimal('capacity_weight_kg', 10, 2)->nullable();
             $table->timestamps();
         });
     }
@@ -30,8 +30,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::table('vehicle_types', function (Blueprint $table) {
-            $table->dropColumn('volume_m3');
-        });
+        Schema::dropIfExists('vehicle_types');
     }
 };

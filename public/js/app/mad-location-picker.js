@@ -67,8 +67,7 @@
     }
 
 
-    function readCoordinate(inputId)
-    {
+    function readCoordinate(inputId) {
         if (!inputId) {
             return null;
         }
@@ -117,7 +116,10 @@
 
 
     window.initMadLocationPicker =
-        async function (root) {
+        async function (
+            root,
+            wire = null
+        ) {
 
             if (
                 !root
@@ -377,32 +379,67 @@
                     longitude
                 ) {
                     if (
-                        !Number.isFinite(
-                            latitude
-                        )
+                        !Number.isFinite(latitude)
                         ||
-                        !Number.isFinite(
-                            longitude
-                        )
+                        !Number.isFinite(longitude)
                     ) {
                         return;
                     }
 
+                    const latitudeValue =
+                        latitude.toFixed(7);
+
+                    const longitudeValue =
+                        longitude.toFixed(7);
 
                     setInputValue(
                         latitudeInputId,
-                        latitude.toFixed(7),
+                        latitudeValue,
+                        false
+                    );
+
+                    setInputValue(
+                        longitudeInputId,
+                        longitudeValue,
+                        false
+                    );
+
+
+                    if (
+                        wire
+                        &&
+                        typeof wire.$set === 'function'
+                    ) {
+
+                        wire.$set(
+                            'data.latitude',
+                            latitudeValue,
+                            false
+                        );
+
+
+                        wire.$set(
+                            'data.longitude',
+                            longitudeValue,
+                            true
+                        );
+
+                        return;
+                    }
+
+                    setInputValue(
+                        latitudeInputId,
+                        latitudeValue,
                         true
                     );
 
 
                     setInputValue(
                         longitudeInputId,
-                        longitude.toFixed(7),
+                        longitudeValue,
                         true
                     );
                 }
-
 
                 /*
                 |--------------------------------------------------------------------------
@@ -443,7 +480,7 @@
                         const result =
                             response
                                 .results
-                                ?.[0];
+                            ?.[0];
 
 
                         if (
@@ -543,7 +580,7 @@
                                     .lng();
 
 
-                            updateCoordinates(
+                            await updateCoordinates(
                                 latitude,
                                 longitude
                             );
@@ -632,7 +669,7 @@
                         }
 
 
-                        updateCoordinates(
+                        await updateCoordinates(
                             latitude,
                             longitude
                         );
@@ -683,7 +720,7 @@
                             event.latLng;
 
 
-                        updateCoordinates(
+                        await updateCoordinates(
                             latitude,
                             longitude
                         );

@@ -82,27 +82,81 @@ class RouteControlTowerService
                     ->values()
                     ->all();
 
+                $routeMetrics = $this->routeMetrics($route, $stops);
+
                 return [
                     'id' => (int) $route->id,
                     'uuid' => (string) $route->uuid,
                     'color' => $color,
+
                     'route_date' => $route->route_date?->toDateString(),
                     'source_date' => $route->source_date?->toDateString(),
+
                     'status' => $this->enumValue($route->status),
-                    'approval_status' => (string) ($route->approval_status ?? 'pending'),
+
+                    'approval_status' =>
+                        (string) ($route->approval_status ?? 'pending'),
+
                     'driver' => [
                         'id' => $route->driver?->id,
                         'name' => $route->driver?->name ?? '-',
                     ],
+
                     'vehicle' => [
                         'id' => $route->vehicle?->id,
                         'plate_number' => $route->vehicle?->plate_number ?? '-',
-                        'category' => $this->enumValue($route->vehicle?->vehicleType?->category),
+                        'category' => $this->enumValue(
+                            $route->vehicle?->vehicleType?->category
+                        ),
                     ],
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | ROUTE SUMMARY
+                    |--------------------------------------------------------------------------
+                    */
+
                     'stop_count' => count($stops),
-                    'predicted_duration_minutes' => (int) ($route->predicted_duration_minutes ?? 0),
+
+                    'predicted_duration_minutes' =>
+                        (int) ($route->predicted_duration_minutes ?? 0),
+
+                    'predicted_cost' =>
+                        (float) ($route->predicted_cost ?? 0),
+
+                    'predicted_package_count' =>
+                        (int) ($route->predicted_package_count ?? 0),
+
+                    'start_time' =>
+                        $route->deliveryStops
+                            ->sortBy('sequence_order')
+                            ->first()
+                            ?->predicted_service_start_time
+                            ?->format('H:i'),
+
+                    'finish_time' =>
+                        $route->deliveryStops
+                            ->sortBy('sequence_order')
+                            ->last()
+                            ?->predicted_service_end_time
+                            ?->format('H:i'),
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | OSRM METRICS
+                    |--------------------------------------------------------------------------
+                    */
+
+                    'distance_km' =>
+                        $routeMetrics['distance_km'],
+
+                    'travel_duration_minutes' =>
+                        $routeMetrics['travel_duration_minutes'],
+
+                    'geometry' =>
+                        $routeMetrics['geometry'],
+
                     'stops' => $stops,
-                    'geometry' => $this->routeGeometry($route, $stops),
                 ];
             })
             ->all();
@@ -143,8 +197,10 @@ class RouteControlTowerService
             ->all();
     }
 
-    protected function routeGeometry(DeliveryRoute $route, array $stops): array
-    {
+    protected function routeMetrics(
+        DeliveryRoute $route,
+        array $stops
+    ): array {
         $branch = $route->branch;
 
         if (
@@ -153,34 +209,80 @@ class RouteControlTowerService
             || $branch->longitude === null
             || empty($stops)
         ) {
-            return [];
+            return [
+                'geometry' => [],
+                'distance_km' => 0,
+                'travel_duration_minutes' => 0,
+            ];
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | KOORDINAT ROUTE
+        |--------------------------------------------------------------------------
+        |
+        | Depot
+        | -> Stop 1
+        | -> Stop 2
+        | -> ...
+        | -> Depot
+        |
+        */
+
         $coordinates = collect([
-            [(float) $branch->longitude, (float) $branch->latitude],
+            [
+                (float) $branch->longitude,
+                (float) $branch->latitude,
+            ],
         ])
-            ->concat(
-                collect($stops)->map(fn (array $stop) => [
+        ->concat(
+            collect($stops)->map(
+                fn (array $stop) => [
                     (float) $stop['store']['longitude'],
                     (float) $stop['store']['latitude'],
-                ])
+                ]
             )
-            ->push([(float) $branch->longitude, (float) $branch->latitude])
-            ->all();
+        )
+        ->push([
+            (float) $branch->longitude,
+            (float) $branch->latitude,
+        ])
+        ->all();
 
         $coordinateString = collect($coordinates)
-            ->map(fn (array $point): string => $point[0] . ',' . $point[1])
+            ->map(
+                fn (array $point): string =>
+                    $point[0] . ',' . $point[1]
+            )
             ->implode(';');
 
-        $baseUrl = rtrim((string) config(
-            'services.osrm.url',
-            env('OSRM_URL', 'http://127.0.0.1:5000')
-        ), '/');
+        $baseUrl = rtrim(
+            (string) config(
+                'services.osrm.url',
+                env('OSRM_URL', 'http://127.0.0.1:5000')
+            ),
+            '/'
+        );
 
         try {
+
+            /*
+            |--------------------------------------------------------------------------
+            | SATU REQUEST OSRM
+            |--------------------------------------------------------------------------
+            |
+            | Sekaligus mendapatkan:
+            | - geometry
+            | - distance
+            | - duration
+            |
+            */
+
             $response = Http::timeout(20)
                 ->get(
-                    $baseUrl . '/route/v1/driving/' . $coordinateString,
+                    $baseUrl
+                    . '/route/v1/driving/'
+                    . $coordinateString,
                     [
                         'overview' => 'full',
                         'geometries' => 'geojson',
@@ -188,37 +290,128 @@ class RouteControlTowerService
                     ]
                 );
 
-            if ($response->failed() || $response->json('code') !== 'Ok') {
-                return $this->fallbackGeometry($coordinates);
+            if (
+                $response->failed()
+                || $response->json('code') !== 'Ok'
+            ) {
+                return $this->fallbackRouteMetrics(
+                    $coordinates
+                );
             }
 
-            $geometry = $response->json('routes.0.geometry.coordinates');
+            /*
+            |--------------------------------------------------------------------------
+            | GEOMETRY
+            |--------------------------------------------------------------------------
+            */
 
-            if (! is_array($geometry)) {
-                return $this->fallbackGeometry($coordinates);
+            $geometryCoordinates =
+                $response->json(
+                    'routes.0.geometry.coordinates'
+                );
+
+            if (! is_array($geometryCoordinates)) {
+                return $this->fallbackRouteMetrics(
+                    $coordinates
+                );
             }
 
-            return collect($geometry)
-                ->filter(fn ($point): bool => is_array($point) && count($point) >= 2)
-                ->map(fn (array $point): array => [
-                    'lat' => (float) $point[1],
-                    'lng' => (float) $point[0],
-                ])
+            $geometry = collect($geometryCoordinates)
+                ->filter(
+                    fn ($point): bool =>
+                        is_array($point)
+                        && count($point) >= 2
+                )
+                ->map(
+                    fn (array $point): array => [
+                        'lat' => (float) $point[1],
+                        'lng' => (float) $point[0],
+                    ]
+                )
                 ->values()
                 ->all();
+
+            /*
+            |--------------------------------------------------------------------------
+            | DISTANCE
+            |--------------------------------------------------------------------------
+            |
+            | OSRM memberikan meter.
+            | Kita simpan di payload sebagai kilometer.
+            |
+            */
+
+            $distanceMeters =
+                (float) (
+                    $response->json(
+                        'routes.0.distance'
+                    )
+                    ?? 0
+                );
+
+            $distanceKm =
+                round(
+                    $distanceMeters / 1000,
+                    2
+                );
+
+            /*
+            |--------------------------------------------------------------------------
+            | DURATION
+            |--------------------------------------------------------------------------
+            |
+            | OSRM memberikan detik.
+            | Kita ubah menjadi menit.
+            |
+            */
+
+            $durationSeconds =
+                (float) (
+                    $response->json(
+                        'routes.0.duration'
+                    )
+                    ?? 0
+                );
+
+            $travelDurationMinutes =
+                (int) round(
+                    $durationSeconds / 60
+                );
+
+            return [
+                'geometry' => $geometry,
+                'distance_km' =>
+                    $distanceKm,
+
+                'travel_duration_minutes' =>
+                    $travelDurationMinutes,
+            ];
+
         } catch (\Throwable) {
-            return $this->fallbackGeometry($coordinates);
+
+            return $this->fallbackRouteMetrics(
+                $coordinates
+            );
         }
     }
 
-    protected function fallbackGeometry(array $coordinates): array
+    protected function fallbackRouteMetrics(array $coordinates): array
     {
-        return collect($coordinates)
-            ->map(fn (array $point): array => [
-                'lat' => (float) $point[1],
-                'lng' => (float) $point[0],
-            ])
-            ->all();
+        return [
+            'geometry' => collect($coordinates)
+                ->map(
+                    fn (array $point): array => [
+                        'lat' => (float) $point[1],
+                        'lng' => (float) $point[0],
+                    ]
+                )
+                ->values()
+                ->all(),
+
+            'distance_km' => 0,
+
+            'travel_duration_minutes' => 0,
+        ];
     }
 
     protected function canAct(DeliveryRoute $route): bool
