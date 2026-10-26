@@ -48,8 +48,6 @@ class DriverRouteController extends Controller
                             ),
 
                     'deliveryStops.store',
-                    'deliveryStops.packages.order',
-                    'deliveryStops.packages.product',
                 ])
                 ->where(
                     'driver_id',
@@ -208,54 +206,7 @@ class DriverRouteController extends Controller
                                                 ?->longitude,
                                     ],
 
-                                    'packages' =>
-                                        $stop
-                                            ->packages
-                                            ->map(
-                                                function (
-                                                    $package
-                                                ): array {
-                                                    return [
-                                                        'tracking_number' =>
-                                                            $package
-                                                                ->tracking_number,
-
-                                                        'order_number' =>
-                                                            $package
-                                                                ->order
-                                                                ?->order_number,
-
-                                                        'product_code' =>
-                                                            $package
-                                                                ->product
-                                                                ?->code,
-
-                                                        'product_name' =>
-                                                            $package
-                                                                ->item,
-
-                                                        'quantity' =>
-                                                            (int)
-                                                            $package
-                                                                ->quantity,
-
-                                                        'uom' =>
-                                                            $this
-                                                                ->enumValue(
-                                                                    $package
-                                                                        ->uom
-                                                                ),
-
-                                                        'status' =>
-                                                            $this
-                                                                ->enumValue(
-                                                                    $package
-                                                                        ->status
-                                                                ),
-                                                    ];
-                                                }
-                                            )
-                                            ->values(),
+                                    'packages' => [],
                                 ];
                             }
                         )

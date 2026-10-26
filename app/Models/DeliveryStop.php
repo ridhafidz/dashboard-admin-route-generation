@@ -49,13 +49,6 @@ class DeliveryStop extends Model
         return $this->belongsTo(Store::class);
     }
 
-    public function packages()
-    {
-        return $this->belongsToMany(Package::class, 'delivery_stop_package')
-            ->withPivot('uuid')
-            ->withTimestamps();
-    }
-
     public function deliveryLogs()
     {
         return $this->hasMany(DeliveryLog::class)->orderBy('recorded_at');

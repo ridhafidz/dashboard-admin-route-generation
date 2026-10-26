@@ -230,15 +230,6 @@ class RouteGenerationService
             );
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | 2. VEHICLE ACTIVE
-        |--------------------------------------------------------------------------
-        |
-        | Tidak lagi membutuhkan box_type / volume_m3.
-        | Vehicle adalah resource satu-per-route.
-        */
-
         $usedVehicleIds = DeliveryRoute::query()
             ->whereDate('route_date', $routeDate)
             ->where('status', '!=', RouteStatus::Cancelled->value)

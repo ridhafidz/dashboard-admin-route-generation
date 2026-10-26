@@ -38,10 +38,7 @@ class Branch extends Model
         return $this->hasMany(Driver::class);
     }
 
-    public function areas(): HasMany
-    {
-        return $this->hasMany(Area::class);
-    }
+
 
     public function deliveryRoutes(): HasMany
     {

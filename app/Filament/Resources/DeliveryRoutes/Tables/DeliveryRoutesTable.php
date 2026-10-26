@@ -38,22 +38,6 @@ class DeliveryRoutesTable
                     ->date('d M Y')
                     ->sortable(),
 
-
-                /*
-                |--------------------------------------------------------------------------
-                | BRANCH
-                |--------------------------------------------------------------------------
-                |
-                | Tidak perlu mengambil branch.init_cab
-                | untuk nama kolom utamanya.
-                |
-                | VIEW sudah mempunyai:
-                |
-                | branch_initial
-                | branch_name
-                |
-                */
-
                 TextColumn::make(
                     'branch_initial'
                 )
@@ -68,33 +52,12 @@ class DeliveryRoutesTable
                     ->searchable()
                     ->sortable(),
 
-
-                /*
-                |--------------------------------------------------------------------------
-                | DRIVER
-                |--------------------------------------------------------------------------
-                */
-
                 TextColumn::make(
                     'driver_name'
                 )
                     ->label('Driver')
                     ->searchable()
                     ->sortable(),
-
-
-                /*
-                |--------------------------------------------------------------------------
-                | VEHICLE
-                |--------------------------------------------------------------------------
-                |
-                | Plate sudah berasal dari VIEW.
-                |
-                | Description vehicle type sementara
-                | tetap menggunakan relationship existing,
-                | supaya tampilan tidak berubah.
-                |
-                */
 
                 TextColumn::make(
                     'plate_number'
@@ -138,21 +101,6 @@ class DeliveryRoutesTable
                     ->searchable()
                     ->sortable(),
 
-                /*
-                |--------------------------------------------------------------------------
-                | STOP COUNT
-                |--------------------------------------------------------------------------
-                |
-                | Sebelumnya:
-                |
-                | ->counts('deliveryStops')
-                |
-                | Sekarang:
-                |
-                | total_stops dari VIEW.
-                |
-                */
-
                 TextColumn::make(
                     'total_stops'
                 )
@@ -164,20 +112,6 @@ class DeliveryRoutesTable
 
                     ->badge()
                     ->sortable(),
-
-
-                TextColumn::make(
-                    'predicted_package_count'
-                )
-                    ->label('Package')
-
-                    ->numeric(
-                        decimalPlaces: 0
-                    )
-
-                    ->badge()
-                    ->sortable(),
-
 
                 TextColumn::make(
                     'predicted_duration_minutes'
@@ -223,13 +157,6 @@ class DeliveryRoutesTable
                 )
                     ->label('Status')
                     ->badge(),
-
-
-                /*
-                |--------------------------------------------------------------------------
-                | APPROVAL STATUS
-                |--------------------------------------------------------------------------
-                */
 
                 TextColumn::make(
                     'approval_status'

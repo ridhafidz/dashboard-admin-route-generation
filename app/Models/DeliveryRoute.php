@@ -13,7 +13,6 @@ class DeliveryRoute extends Model
         'branch_id',
         'driver_id',
         'vehicle_id',
-        'area_id',
         'source_date',
         'route_date',
         'status',
@@ -54,10 +53,7 @@ class DeliveryRoute extends Model
         return $this->belongsTo(Vehicle::class);
     }
 
-    public function area()
-    {
-        return $this->belongsTo(Area::class);
-    }
+
 
     public function deliveryStops()
     {

@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Enums\RouteStatus;
 use App\Models\DeliveryRoute;
+use App\Models\Product;
+use Illuminate\Support\Facades\DB;
 use App\Services\BranchContext;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
@@ -56,6 +58,7 @@ class RouteControlTowerService
                             'so_numbers' => is_array($stop->source_so_numbers)
                                 ? $stop->source_so_numbers
                                 : [],
+                            'box_type' => trim((string) ($stop->box_type ?? '')),
                             'store' => [
                                 'id' => $stop->store?->id,
                                 'code' => $stop->store?->code,
@@ -83,6 +86,7 @@ class RouteControlTowerService
                     ->all();
 
                 $routeMetrics = $this->routeMetrics($route, $stops);
+                $volumeMetrics = $this->routeVolumeMetrics($route, $stops);
 
                 return [
                     'id' => (int) $route->id,
@@ -108,7 +112,12 @@ class RouteControlTowerService
                         'category' => $this->enumValue(
                             $route->vehicle?->vehicleType?->category
                         ),
+                        'box_type' => $this->enumValue(
+                            $route->vehicle?->vehicleType?->box_type
+                        ),
                     ],
+
+                    'volume' => $volumeMetrics,
 
                     /*
                     |--------------------------------------------------------------------------
@@ -176,6 +185,334 @@ class RouteControlTowerService
         ];
     }
 
+    protected function routeVolumeMetrics(
+        DeliveryRoute $route,
+        array $stops
+    ): array {
+
+        $vehicleType =
+            $route->vehicle?->vehicleType;
+        
+        $volumeM3 = (float) (
+            $vehicleType?->volume_m3
+            ?? 0
+        );
+
+        $boxCapacityCm3 =
+            $volumeM3 * 1_000_000;
+
+        $packingUtilization = (float) (
+            $vehicleType?->packing_utilization
+            ?? 0
+        );
+
+       if (
+            $packingUtilization <= 0
+            || $packingUtilization > 1
+        ) {
+            $packingUtilization = 1;
+        }
+
+        $usableCapacityCm3 = $boxCapacityCm3 * $packingUtilization;
+
+        $soBoxKeys = collect($stops)
+            ->flatMap(function (array $stop): array {
+
+                $boxType = trim(
+                    (string) (
+                        $stop['box_type']
+                        ?? ''
+                    )
+                );
+
+                if ($boxType === '') {
+                    return [];
+                }
+
+                return collect(
+                    $stop['so_numbers'] ?? []
+                )
+                    ->map(function ($soNumber) use ($boxType): array {
+
+                        $soNumber = trim(
+                            (string) $soNumber
+                        );
+
+                        if ($soNumber === '') {
+                            return [];
+                        }
+
+                        return [
+                            'so_number' =>
+                                $soNumber,
+
+                            'box_type' =>
+                                $boxType,
+                        ];
+                    })
+                    ->filter()
+                    ->values()
+                    ->all();
+            })
+            ->filter()
+            ->unique(
+                fn (array $item): string =>
+                    $item['so_number']
+                    . '::'
+                    . $item['box_type']
+            )
+            ->values();
+
+        if ($soBoxKeys->isEmpty()) {
+            return [
+                'loaded_cm3' => 0,
+
+                'box_capacity_cm3' =>
+                    round($boxCapacityCm3, 2),
+
+                'packing_utilization' =>
+                    round(
+                        $packingUtilization,
+                        4
+                    ),
+
+                'usable_capacity_cm3' =>
+                    round(
+                        $usableCapacityCm3,
+                        2
+                    ),
+
+                'remaining_cm3' =>
+                    round(
+                        $usableCapacityCm3,
+                        2
+                    ),
+
+                'utilization_pct' => 0,
+            ];
+        }
+
+        $soNumbers = $soBoxKeys
+            ->pluck('so_number')
+            ->unique()
+            ->values()
+            ->all();
+
+        $connection = config(
+            'services.delivery_source.connection'
+        );
+
+        $db =
+            is_string($connection)
+            && trim($connection) !== ''
+                ? DB::connection(
+                    trim($connection)
+                )
+                : DB::connection();
+
+        $soTable = trim(
+            (string) config(
+                'services.delivery_source.so_table',
+                'so_sda'
+            )
+        );
+
+        if ($soTable === '') {
+            $soTable = 'so_sda';
+        }
+
+        $sourceRows = $db
+            ->table($soTable)
+            ->whereIn(
+                'so_number',
+                $soNumbers
+            )
+            ->select([
+                'so_number',
+                'product_id',
+                'qty_cartons',
+                'qty_packs',
+                'qty_pcs',
+            ])
+            ->get();
+
+        $productCodes = $sourceRows
+            ->pluck('product_id')
+            ->map(
+                fn ($value): string =>
+                    trim((string) $value)
+            )
+            ->filter()
+            ->unique()
+            ->values();
+
+        $products = Product::query()
+            ->whereIn(
+                'code',
+                $productCodes
+            )
+            ->get()
+            ->keyBy(
+                fn (Product $product): string =>
+                    trim(
+                        (string) $product->code
+                    )
+            );
+
+        $allowedKeys = $soBoxKeys
+            ->mapWithKeys(
+                fn (array $item): array => [
+                    $item['so_number']
+                    . '::'
+                    . $item['box_type']
+                        => true,
+                ]
+            );
+
+        $loadedVolumeCm3 = 0.0;
+
+        foreach ($sourceRows as $row) {
+
+            $productCode = trim(
+                (string) $row->product_id
+            );
+
+            /** @var Product|null $product */
+            $product = $products->get($productCode);
+            if (! $product) {
+                continue;
+            }
+
+            $boxType = trim(
+                (string) $product->box_type
+            );
+
+            $soNumber = trim(
+                (string) $row->so_number
+            );
+
+            $key = $soNumber . '::' . $boxType;
+
+            if (! isset($allowedKeys[$key])) {
+                continue;
+            }
+
+            $qtyCartons =
+                is_numeric(
+                    $row->qty_cartons
+                    ?? null
+                )
+                    ? (float) $row->qty_cartons
+                    : 0;
+
+            $qtyPacks =
+                is_numeric(
+                    $row->qty_packs
+                    ?? null
+                )
+                    ? (float) $row->qty_packs
+                    : 0;
+
+            $qtyPcs =
+                is_numeric(
+                    $row->qty_pcs
+                    ?? null
+                )
+                    ? (float) $row->qty_pcs
+                    : 0;
+
+            $cartonVolumeCm3 =
+                (float) (
+                    $product->carton_volume_cm3
+                    ?? 0
+                );
+
+            $unitVolumeCm3 =
+                (float) (
+                    $product->unit_volume_cm3
+                    ?? 0
+                );
+
+            $unitsPerPack =
+                (int) (
+                    $product->units_per_pack
+                    ?? 0
+                );
+
+            $itemVolumeCm3 =
+                (
+                    $qtyCartons
+                    * $cartonVolumeCm3
+                )
+                +
+                (
+                    $qtyPacks
+                    * $unitsPerPack
+                    * $unitVolumeCm3
+                )
+                +
+                (
+                    $qtyPcs
+                    * $unitVolumeCm3
+                );
+
+            $loadedVolumeCm3 += $itemVolumeCm3;
+        }
+
+        $remainingCm3 = max(
+            0,
+            $usableCapacityCm3
+            - $loadedVolumeCm3
+        );
+
+        $utilizationPct =
+            $usableCapacityCm3 > 0
+                ? (
+                    $loadedVolumeCm3
+                    /
+                    $usableCapacityCm3
+                ) * 100
+                : 0;
+
+        return [
+            'loaded_cm3' =>
+                round(
+                    $loadedVolumeCm3,
+                    2
+                ),
+
+            'box_capacity_cm3' =>
+                round(
+                    $boxCapacityCm3,
+                    2
+                ),
+
+            'packing_utilization' =>
+                round(
+                    $packingUtilization,
+                    4
+                ),
+
+            'usable_capacity_cm3' =>
+                round(
+                    $usableCapacityCm3,
+                    2
+                ),
+
+            'remaining_cm3' =>
+                round(
+                    $remainingCm3,
+                    2
+                ),
+
+            'utilization_pct' =>
+                round(
+                    $utilizationPct,
+                    2
+                ),
+        ];
+    }
+
     public function availableDates(): array
     {
         $branchId = app(BranchContext::class)->getId();
@@ -201,6 +538,7 @@ class RouteControlTowerService
         DeliveryRoute $route,
         array $stops
     ): array {
+
         $branch = $route->branch;
 
         if (
@@ -215,19 +553,6 @@ class RouteControlTowerService
                 'travel_duration_minutes' => 0,
             ];
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | KOORDINAT ROUTE
-        |--------------------------------------------------------------------------
-        |
-        | Depot
-        | -> Stop 1
-        | -> Stop 2
-        | -> ...
-        | -> Depot
-        |
-        */
 
         $coordinates = collect([
             [

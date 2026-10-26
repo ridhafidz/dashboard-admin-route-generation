@@ -15,12 +15,11 @@ return new class extends Migration
             $table->id();
             $table->uuid('uuid')->unique();
             $table->enum('category', ['engkel', 'double', 'l300']);
-            $table->enum('box_type', ['cold_storage', 'dry']);
+            $table->enum('box_type', ['cold_storage', 'dry', 'khusus']);
             $table->decimal('length_cm', 8, 2);
             $table->decimal('width_cm', 8, 2);
             $table->decimal('height_cm', 8, 2);
             $table->decimal('volume_m3', 10, 3)->nullable();
-            $table->decimal('capacity_weight_kg', 10, 2)->nullable();
             $table->timestamps();
         });
     }

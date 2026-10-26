@@ -6,7 +6,6 @@ use App\Enums\OrderStatus;
 use App\Models\Concerns\HasUuid;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Order extends Model
 {
@@ -90,13 +89,6 @@ class Order extends Model
     {
         return $this->belongsTo(
             Store::class
-        );
-    }
-
-    public function packages(): HasMany
-    {
-        return $this->hasMany(
-            Package::class
         );
     }
 }

@@ -14,6 +14,7 @@ use RuntimeException;
 class RouteReoptimizationService
 {
     protected const DEFAULT_BRANCH_START_TIME = '08:00';
+    protected const DEFAULT_SERVICE_DURATION_MINUTES = 15;
 
     public function preview(
         DeliveryRoute|int $route,
@@ -155,9 +156,9 @@ class RouteReoptimizationService
             'address' => (string) ($store->address ?? ''),
             'latitude' => (float) $store->latitude,
             'longitude' => (float) $store->longitude,
-            'opening_time' => $this->normalizeTime($store->opening_time),
-            'closing_time' => $this->normalizeTime($store->closing_time),
-            'service_duration_minutes' => (int) ($store->service_duration_minutes ?? 15),
+            'opening_time' => null,
+            'closing_time' => null,
+            'service_duration_minutes' => self::DEFAULT_SERVICE_DURATION_MINUTES,
             'so_numbers' => is_array($stop->source_so_numbers) ? $stop->source_so_numbers : [],
             'items' => [],
         ];

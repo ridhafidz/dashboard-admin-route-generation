@@ -57,9 +57,7 @@ class StoreResource extends Resource
         $branchId = app(BranchContext::class)->getId();
 
         if ($branchId) {
-            $query->whereHas('area', function ($query) use ($branchId) {
-                $query->where('branch_id', $branchId);
-            });
+            $query->where('branch_id', $branchId);
         }
 
         return $query;

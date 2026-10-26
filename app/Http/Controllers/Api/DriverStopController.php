@@ -2,13 +2,11 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Enums\PackageStatus;
 use App\Enums\DeliveryStopStatus;
 use App\Http\Controllers\Api\Concerns\DriverApiSupport;
 use App\Http\Controllers\Controller;
 use App\Models\DeliveryLog;
 use App\Models\DeliveryStop;
-use App\Models\Order;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -136,10 +134,6 @@ class DriverStopController extends Controller
                     $stop->save();
                 }
 
-
-                /*
-                 * Arrival hanya sekali per stop.
-                 */
                 $alreadyLogged =
                     DeliveryLog::query()
                         ->where(
@@ -339,85 +333,6 @@ class DriverStopController extends Controller
                 ]);
 
                 $stop->save();
-
-
-                /*
-                |--------------------------------------------------------------------------
-                | PACKAGES
-                |--------------------------------------------------------------------------
-                */
-
-                $packages =
-                    $stop
-                        ->packages()
-                        ->get();
-
-
-                foreach (
-                    $packages
-                    as
-                    $package
-                ) {
-                    $package->forceFill([
-                        'status' =>
-                            PackageStatus::Delivered,
-                    ]);
-
-                    $package->save();
-                }
-
-
-                /*
-                |--------------------------------------------------------------------------
-                | SALES ORDERS
-                |--------------------------------------------------------------------------
-                */
-
-                $orderIds =
-                    $packages
-                        ->pluck(
-                            'order_id'
-                        )
-                        ->filter()
-                        ->unique();
-
-
-                foreach (
-                    $orderIds
-                    as
-                    $orderId
-                ) {
-                    $order =
-                        Order::query()
-                            ->find(
-                                $orderId
-                            );
-
-                    if (! $order) {
-                        continue;
-                    }
-
-
-                    $stillOpen =
-                        $order
-                            ->packages()
-                            ->where(
-                                'status',
-                                '!=',
-                                PackageStatus::Delivered->value
-                            )
-                            ->exists();
-
-
-                    $order->forceFill([
-                        'status' =>
-                            $stillOpen
-                                ? 'processing'
-                                : 'completed',
-                    ]);
-
-                    $order->save();
-                }
 
 
                 /*

@@ -49,10 +49,6 @@ class OrderResource extends Resource
 
     public static function getRelations(): array
     {
-        /*
-         * Package sekarang dikelola melalui Repeater
-         * pada form Sales Order.
-         */
         return [];
     }
 
@@ -69,7 +65,7 @@ class OrderResource extends Resource
     {
         $query = parent::getEloquentQuery()
             ->with([
-                'store.area',
+                'store',
             ]);
 
         $branchId = app(
@@ -78,7 +74,7 @@ class OrderResource extends Resource
 
         if ($branchId) {
             $query->whereHas(
-                'store.area',
+                'store',
                 fn (Builder $query): Builder =>
                     $query->where(
                         'branch_id',

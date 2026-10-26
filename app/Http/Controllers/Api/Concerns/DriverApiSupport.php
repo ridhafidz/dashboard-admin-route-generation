@@ -123,8 +123,6 @@ trait DriverApiSupport
             ->with([
                 'deliveryRoute',
                 'store',
-                'packages.order',
-                'packages.product',
             ])
             ->where(
                 'uuid',

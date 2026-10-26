@@ -302,8 +302,6 @@ class DriverTracking extends Page
 
 
                         'deliveryLogs.deliveryStop.store',
-
-                        'deliveryLogs.deliveryStop.packages.order',
                     ])
 
                     ->whereIn(
@@ -458,49 +456,7 @@ class DriverTracking extends Page
                             ->deliveryStop;
 
 
-                    $packages =
-                        $stop
-                            ?->packages
-                            ?->map(
-                                function (
-                                    $package
-                                ): array {
-
-                                    return [
-
-                                        'order_number' =>
-                                            $package
-                                                ->order
-                                                ?->order_number,
-
-                                        /*
-                                         * Package item sudah menyimpan
-                                         * nama produk.
-                                         *
-                                         * Jadi tidak perlu eager-load
-                                         * relation product.
-                                         */
-                                        'product_name' =>
-                                            $package
-                                                ->item,
-
-                                        'quantity' =>
-                                            $package
-                                                ->quantity,
-
-                                        'uom' =>
-                                            $this
-                                                ->enumValue(
-                                                    $package
-                                                        ->uom
-                                                ),
-                                    ];
-                                }
-                            )
-                            ?->values()
-                            ?->all()
-
-                        ?? [];
+                    $packages = [];
 
 
                     $points[] = [
