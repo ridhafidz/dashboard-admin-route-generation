@@ -20,6 +20,7 @@ return new class extends Migration
             $table->decimal('width_cm', 8, 2);
             $table->decimal('height_cm', 8, 2);
             $table->decimal('volume_m3', 10, 3)->nullable();
+            $table->decimal('packing_utilization', 5, 4)->default(0.9500);
             $table->timestamps();
         });
     }

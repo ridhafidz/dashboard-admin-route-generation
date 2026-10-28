@@ -841,6 +841,7 @@ class DeliverySourceService
                 [
                     'dry',
                     'cold_storage',
+                    'khusus',
                 ],
                 true
             )

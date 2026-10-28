@@ -87,6 +87,12 @@ class RouteControlTowerService
 
                 $routeMetrics = $this->routeMetrics($route, $stops);
                 $volumeMetrics = $this->routeVolumeMetrics($route, $stops);
+                $routeTimeline =
+                    $this->routeTimeline(
+                        $route,
+                        $stops,
+                        $routeMetrics
+                    );
 
                 return [
                     'id' => (int) $route->id,
@@ -137,18 +143,10 @@ class RouteControlTowerService
                         (int) ($route->predicted_package_count ?? 0),
 
                     'start_time' =>
-                        $route->deliveryStops
-                            ->sortBy('sequence_order')
-                            ->first()
-                            ?->predicted_service_start_time
-                            ?->format('H:i'),
+                        $routeTimeline['start_time'],
 
                     'finish_time' =>
-                        $route->deliveryStops
-                            ->sortBy('sequence_order')
-                            ->last()
-                            ?->predicted_service_end_time
-                            ?->format('H:i'),
+                        $routeTimeline['finish_time'],
 
                     /*
                     |--------------------------------------------------------------------------
@@ -551,6 +549,7 @@ class RouteControlTowerService
                 'geometry' => [],
                 'distance_km' => 0,
                 'travel_duration_minutes' => 0,
+                'first_leg_duration_minutes' => 0,
             ];
         }
 
@@ -581,6 +580,13 @@ class RouteControlTowerService
             )
             ->implode(';');
 
+        logger()->info('CONTROL_TOWER_OSRM_DEBUG', [
+            'route_id' => $route->id,
+            'stop_count' => count($stops),
+            'coordinate_count' => count($coordinates),
+            'coordinate_string' => $coordinateString,
+        ]);
+
         $baseUrl = rtrim(
             (string) config(
                 'services.osrm.url',
@@ -590,18 +596,6 @@ class RouteControlTowerService
         );
 
         try {
-
-            /*
-            |--------------------------------------------------------------------------
-            | SATU REQUEST OSRM
-            |--------------------------------------------------------------------------
-            |
-            | Sekaligus mendapatkan:
-            | - geometry
-            | - distance
-            | - duration
-            |
-            */
 
             $response = Http::timeout(20)
                 ->get(
@@ -614,6 +608,13 @@ class RouteControlTowerService
                         'steps' => 'false',
                     ]
                 );
+
+            logger()->info('CONTROL_TOWER_OSRM_RESPONSE', [
+                'route_id' => $route->id,
+                'status' => $response->status(),
+                'successful' => $response->successful(),
+                'body' => $response->body(),
+            ]);
 
             if (
                 $response->failed()
@@ -680,16 +681,6 @@ class RouteControlTowerService
                     2
                 );
 
-            /*
-            |--------------------------------------------------------------------------
-            | DURATION
-            |--------------------------------------------------------------------------
-            |
-            | OSRM memberikan detik.
-            | Kita ubah menjadi menit.
-            |
-            */
-
             $durationSeconds =
                 (float) (
                     $response->json(
@@ -702,14 +693,34 @@ class RouteControlTowerService
                 (int) round(
                     $durationSeconds / 60
                 );
+            
+            $firstLegDurationSeconds =
+                (float) (
+                    $response->json(
+                        'routes.0.legs.0.duration'
+                    )
+                    ?? 0
+                );
+
+            $firstLegDurationMinutes =
+                (int) round(
+                    $firstLegDurationSeconds / 60
+                );
+
+            logger()->info('CONTROL_TOWER_OSRM_METRICS', [
+                'route_id' => $route->id,
+                'distance_meters' => $distanceMeters,
+                'distance_km' => $distanceKm,
+                'duration_seconds' => $durationSeconds,
+                'travel_duration_minutes' => $travelDurationMinutes,
+                'geometry_count' => count($geometry),
+            ]);
 
             return [
                 'geometry' => $geometry,
-                'distance_km' =>
-                    $distanceKm,
-
-                'travel_duration_minutes' =>
-                    $travelDurationMinutes,
+                'distance_km' => $distanceKm,
+                'travel_duration_minutes' => $travelDurationMinutes,
+                'first_leg_duration_minutes' => $firstLegDurationMinutes,
             ];
 
         } catch (\Throwable) {
@@ -736,6 +747,93 @@ class RouteControlTowerService
             'distance_km' => 0,
 
             'travel_duration_minutes' => 0,
+
+            'first_leg_duration_minutes' => 0,
+        ];
+    }
+
+    protected function routeTimeline(
+        DeliveryRoute $route,
+        array $stops,
+        array $routeMetrics
+    ): array {
+
+        if (empty($stops)) {
+            return [
+                'start_time' => null,
+                'finish_time' => null,
+            ];
+        }
+
+        $firstStop = collect($stops)
+            ->sortBy('sequence')
+            ->first();
+
+        $firstArrival =
+            $firstStop['predicted_arrival']
+            ?? null;
+
+        if (! $firstArrival) {
+            return [
+                'start_time' => null,
+                'finish_time' => null,
+            ];
+        }
+
+        $firstLegDurationMinutes =
+            (int) (
+                $routeMetrics[
+                    'first_leg_duration_minutes'
+                ]
+                ?? 0
+            );
+
+        $routeDate =
+            $route->route_date?->toDateString();
+
+        if (! $routeDate) {
+            return [
+                'start_time' => null,
+                'finish_time' => null,
+            ];
+        }
+
+        $routeStart =
+            Carbon::parse(
+                $routeDate
+                . ' '
+                . $firstArrival
+            )
+            ->subMinutes(
+                max(
+                    0,
+                    $firstLegDurationMinutes
+                )
+            );
+
+        $routeDurationMinutes =
+            max(
+                0,
+                (int) (
+                    $route
+                        ->predicted_duration_minutes
+                    ?? 0
+                )
+            );
+
+        $routeFinish =
+            $routeStart
+                ->copy()
+                ->addMinutes(
+                    $routeDurationMinutes
+                );
+
+        return [
+            'start_time' =>
+                $routeStart->format('H:i'),
+
+            'finish_time' =>
+                $routeFinish->format('H:i'),
         ];
     }
 

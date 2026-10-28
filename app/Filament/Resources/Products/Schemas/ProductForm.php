@@ -48,11 +48,6 @@ class ProductForm
                                     ]
                                 )
                         )
-                        ->helperText(
-                            'Produk Dry hanya boleh dibawa box Dry. '
-                            . 'Produk Cold Storage hanya boleh dibawa '
-                            . 'box Cold Storage.'
-                        )
                         ->required(),
 
                     TextInput::make('units_per_carton')
@@ -62,93 +57,73 @@ class ProductForm
                         ->default(1)
                         ->required(),
 
-                    Select::make('status')
-                        ->label('Status Produk')
-                        ->options(
-                            collect(ProductStatus::cases())
-                                ->mapWithKeys(
-                                    fn (ProductStatus $case) => [
-                                        $case->value =>
-                                            $case->getLabel(),
-                                    ]
-                                )
-                        )
-                        ->default(
-                            ProductStatus::Active->value
-                        )
-                        ->required(),
+                    TextInput::make('units_per_pack')
+                        ->label('Isi PCS per Pack')
+                        ->integer()
+                        ->minValue(0)
+                        ->default(0),
                 ])
                 ->columns(2),
 
-            Section::make('Berat dan Volume')
+            Section::make('Volume PCS dan Karton')
                 ->description(
-                    'Volume menggunakan satuan meter kubik (m³). '
-                    . 'Berat dicatat sebagai informasi operasional, '
-                    . 'sedangkan kapasitas kendaraan nantinya '
-                    . 'ditentukan berdasarkan volume.'
+                    'Volume PCS (Product) menggunakan satuan meter kubik (cm³). '
+                    . 'Volume Karton (Box) menggunakan satuan meter kubik (cm³). '
+                    . 'Gunakan volume aktual karton: panjang × lebar × tinggi dalam meter.'
                 )
                 ->schema([
-                    TextInput::make('unit_weight_kg')
-                        ->label('Berat per PCS')
+                    TextInput::make('carton_length_cm')
+                        ->label('Panjang Karton (cm)')
                         ->numeric()
-                        ->step(0.0001)
-                        ->minValue(0.0001)
-                        ->suffix('kg')
-                        ->required(),
+                        ->step(0.01)
+                        ->minValue(0.01)
+                        ->suffix('cm'),
 
-                    TextInput::make('carton_weight_kg')
-                        ->label('Berat per Karton/PAX')
+                    TextInput::make('carton_width_cm')
+                        ->label('Lebar Karton (cm)')
                         ->numeric()
-                        ->step(0.0001)
-                        ->minValue(0.0001)
-                        ->suffix('kg')
-                        ->helperText(
-                            'Masukkan berat aktual karton '
-                            . 'termasuk berat kemasannya.'
-                        )
-                        ->required(),
+                        ->step(0.01)
+                        ->minValue(0.01)
+                        ->suffix('cm'),
 
-                    TextInput::make('unit_volume_m3')
+                    TextInput::make('carton_height_cm')
+                        ->label('Tinggi Karton (cm)')
+                        ->numeric()
+                        ->step(0.01)
+                        ->minValue(0.01)
+                        ->suffix('cm'),
+                ])
+                ->columns(2),
+
+            Section::make('Volume PCS dan Karton')
+                ->description(
+                    'Volume PCS (Product) menggunakan satuan meter kubik (cm³). '
+                    . 'Volume Karton (Box) menggunakan satuan meter kubik (cm³). '
+                    . 'Gunakan volume aktual karton: panjang × lebar × tinggi dalam meter.'
+                )
+                ->schema([
+                    TextInput::make('unit_volume_cm3')
                         ->label('Volume per PCS')
                         ->numeric()
                         ->step(0.00000001)
                         ->minValue(0.00000001)
-                        ->suffix('m³')
+                        ->suffix('cm³')
+                        ->helperText(
+                            'Volume Karton / Jumlah PCS Product.'
+                        )
                         ->required(),
 
-                    TextInput::make('carton_volume_m3')
+                    TextInput::make('carton_volume_cm3')
                         ->label('Volume per Karton/PAX')
                         ->numeric()
                         ->step(0.000001)
                         ->minValue(0.000001)
-                        ->suffix('m³')
+                        ->suffix('cm³')
                         ->helperText(
                             'Gunakan volume aktual karton: '
-                            . 'panjang × lebar × tinggi dalam meter.'
+                            . 'panjang × lebar × tinggi dalam centimeter.'
                         )
                         ->required(),
-                ])
-                ->columns(2),
-
-            Section::make('Harga Opsional')
-                ->description(
-                    'Harga boleh dikosongkan. Harga masih dapat '
-                    . 'disesuaikan pada masing-masing Sales Order.'
-                )
-                ->schema([
-                    TextInput::make('unit_price')
-                        ->label('Harga per PCS')
-                        ->numeric()
-                        ->minValue(0)
-                        ->prefix('Rp')
-                        ->nullable(),
-
-                    TextInput::make('carton_price')
-                        ->label('Harga per Karton/PAX')
-                        ->numeric()
-                        ->minValue(0)
-                        ->prefix('Rp')
-                        ->nullable(),
                 ])
                 ->columns(2),
         ]);

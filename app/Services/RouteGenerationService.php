@@ -324,6 +324,7 @@ class RouteGenerationService
                             [
                                 'dry',
                                 'cold_storage',
+                                'khusus',
                             ],
                             true
                         )
@@ -875,13 +876,9 @@ class RouteGenerationService
                             }
                         );
 
-                    $lastStop = collect($optimizedRoute)
-                        ->sortBy('sequence')
-                        ->last();
-
-                    $predictedDuration = $this->minutesBetween(
-                        $deliveryStartTime,
-                        (string) $lastStop['service_end']
+                    $predictedDuration = (int) (
+                        $cluster['route_duration_minutes']
+                        ?? 0
                     );
 
                     $route = DeliveryRoute::create([
@@ -941,6 +938,7 @@ class RouteGenerationService
                                 [
                                     'dry',
                                     'cold_storage',
+                                    'khusus',
                                 ],
                                 true
                             )

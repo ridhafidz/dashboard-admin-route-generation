@@ -63,4 +63,10 @@ return [
         ),
     ],
 
+    'delivery_source' => [
+        'connection' => env('DELIVERY_SOURCE_CONNECTION'),
+        'so_table' => env('DELIVERY_SOURCE_SO_TABLE', 'so_sda'),
+        'customer_table' => env('DELIVERY_SOURCE_CUSTOMER_TABLE', 'cust_sda'),
+    ],
+
 ];

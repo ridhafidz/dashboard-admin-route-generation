@@ -2,8 +2,6 @@
 
 namespace App\Filament\Resources\Orders;
 
-use App\Filament\Resources\Orders\Pages\CreateOrder;
-use App\Filament\Resources\Orders\Pages\EditOrder;
 use App\Filament\Resources\Orders\Pages\ListOrders;
 use App\Filament\Resources\Orders\Schemas\OrderForm;
 use App\Filament\Resources\Orders\Tables\OrdersTable;
@@ -12,9 +10,10 @@ use App\Services\BranchContext;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
-use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use Filament\Support\Icons\Heroicon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
 
 class OrderResource extends Resource
 {
@@ -56,33 +55,68 @@ class OrderResource extends Resource
     {
         return [
             'index' => ListOrders::route('/'),
-            'create' => CreateOrder::route('/create'),
-            'edit' => EditOrder::route('/{record}/edit'),
         ];
+    }
+
+    public static function canCreate(): bool
+    {
+        return false;
     }
 
     public static function getEloquentQuery(): Builder
     {
-        $query = parent::getEloquentQuery()
-            ->with([
-                'store',
-            ]);
+        $query = parent::getEloquentQuery();
 
         $branchId = app(
             BranchContext::class
         )->getId();
 
         if ($branchId) {
-            $query->whereHas(
-                'store',
-                fn (Builder $query): Builder =>
-                    $query->where(
-                        'branch_id',
-                        $branchId
-                    )
-            );
+            $branch = DB::table('branches')
+                ->where('id', $branchId)
+                ->first();
+
+            if ($branch) {
+                $query->where(
+                    'cabID',
+                    $branch->cab_id
+                );
+            }
         }
 
-        return $query;
+        return $query
+            ->selectRaw('
+                MIN(visit_key) as visit_key,
+                cabID,
+                customerID,
+                so_number,
+                DATE(visit_date) as order_date,
+                COUNT(DISTINCT product_id) as product_count,
+                SUM(qty_cartons) as total_cartons,
+                SUM(qty_packs) as total_packs,
+                SUM(qty_pcs) as total_pcs,
+                SUM(COALESCE(subtotal, 0)) as total_value,
+                MAX(status) as status
+            ')
+            ->where(
+                'status',
+                'EFFECTIVECALL'
+            )
+            ->whereNotNull(
+                'so_number'
+            )
+            ->where(
+                'so_number',
+                '!=',
+                ''
+            )
+            ->groupBy(
+                'cabID',
+                'customerID',
+                'so_number',
+                DB::raw(
+                    'DATE(visit_date)'
+                )
+            );  
     }
 }

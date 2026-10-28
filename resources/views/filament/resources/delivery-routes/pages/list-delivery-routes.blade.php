@@ -387,6 +387,152 @@
 
                             </div>
 
+                            @php
+                                $loadedCm3 = (float) (
+                                    $route['volume']['loaded_cm3'] ?? 0
+                                );
+
+                                $usableCapacityCm3 = (float) (
+                                    $route['volume']['usable_capacity_cm3'] ?? 0
+                                );
+
+                                $remainingCm3 = (float) (
+                                    $route['volume']['remaining_cm3'] ?? 0
+                                );
+
+                                $utilizationPct = (float) (
+                                    $route['volume']['utilization_pct'] ?? 0
+                                );
+
+                                $boxCapacityCm3 = (float) (
+                                    $route['volume']['box_capacity_cm3'] ?? 0
+                                );
+
+                                $packingUtilization = (float) (
+                                    $route['volume']['packing_utilization'] ?? 0
+                                );
+                            @endphp
+
+                            <div class="ct-volume-card">
+                                <div class="ct-volume-head">
+                                    <div>
+                                        <span>Muatan Kendaraan</span>
+
+                                        <strong>
+                                            {{ number_format(
+                                                $loadedCm3,
+                                                0,
+                                                ',',
+                                                '.'
+                                            ) }}
+                                            /
+                                            {{ number_format(
+                                                $usableCapacityCm3,
+                                                0,
+                                                ',',
+                                                '.'
+                                            ) }}
+                                            cm³
+                                        </strong>
+                                    </div>
+
+                                    <b>
+                                        {{ number_format(
+                                            $utilizationPct,
+                                            2,
+                                            ',',
+                                            '.'
+                                        ) }}%
+                                    </b>
+                                </div>
+
+                                @php
+                                    $volumeStatusClass = match (true) {
+                                        $utilizationPct > 100 => 'overload',
+                                        $utilizationPct >= 86 => 'high',
+                                        $utilizationPct >= 61 => 'normal',
+                                        default => 'low',
+                                    };
+                                @endphp
+
+                                <div class="ct-volume-progress">
+                                    <div
+                                        class="ct-volume-progress-bar ct-volume-progress-{{ $volumeStatusClass }}"
+                                        style="
+                                            width:
+                                                {{ min(
+                                                    100,
+                                                    max(
+                                                        0,
+                                                        $utilizationPct
+                                                    )
+                                                ) }}%;
+                                        "
+                                    ></div>
+                                </div>
+                                <div class="ct-volume-status ct-volume-status-{{ $volumeStatusClass }}">
+                                    @switch($volumeStatusClass)
+                                        @case('overload')
+                                            Over Capacity
+                                            @break
+
+                                        @case('high')
+                                            Hampir Penuh
+                                            @break
+
+                                        @case('normal')
+                                            Kapasitas Optimal
+                                            @break
+
+                                        @default
+                                            Kapasitas Rendah
+                                    @endswitch
+                                </div>
+
+                                <div class="ct-volume-meta">
+                                    <div>
+                                        <span>Sisa Muat</span>
+
+                                        <strong>
+                                            {{ number_format(
+                                                $remainingCm3,
+                                                0,
+                                                ',',
+                                                '.'
+                                            ) }}
+                                            cm³
+                                        </strong>
+                                    </div>
+
+                                    <div>
+                                        <span>Kapasitas Box</span>
+
+                                        <strong>
+                                            {{ number_format(
+                                                $boxCapacityCm3,
+                                                0,
+                                                ',',
+                                                '.' 
+                                            ) }}
+                                            cm³
+                                        </strong>
+                                    </div>
+
+                                    <div>
+                                        <span>Packing</span>
+
+                                        <strong>
+                                            {{ number_format(
+                                                $packingUtilization * 100,
+                                                0,
+                                                ',',
+                                                '.'
+                                            ) }}%
+                                        </strong>
+                                    </div>
+                                </div>
+                            </div>
+
                             <div class="ct-route-meta">
 
                                 <span>
@@ -996,6 +1142,170 @@
     }
 
     .ct-invalid-meta{
+        grid-template-columns:1fr;
+    }
+}
+
+.ct-volume-card{
+    margin-top:12px;
+    padding:11px 12px;
+    border:1px solid #e5e7eb;
+    border-radius:10px;
+    background:#f9fafb;
+}
+
+.dark .ct-volume-card{
+    background:#1f2937;
+    border-color:#374151;
+}
+
+.ct-volume-head{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-end;
+    gap:12px;
+}
+
+.ct-volume-head span,
+.ct-volume-head strong{
+    display:block;
+}
+
+.ct-volume-head span{
+    font-size:9px;
+    color:#6b7280;
+}
+
+.ct-volume-head strong{
+    margin-top:3px;
+    font-size:12px;
+}
+
+.ct-volume-head b{
+    font-size:12px;
+    font-weight:700;
+}
+
+.ct-volume-progress{
+    width:100%;
+    height:7px;
+    margin-top:8px;
+    border-radius:999px;
+    overflow:hidden;
+    background:#e5e7eb;
+}
+
+.dark .ct-volume-progress{
+    background:#374151;
+}
+
+.ct-volume-progress-bar{
+    height:100%;
+    border-radius:999px;
+    transition:width .25s ease;
+}
+
+.ct-volume-progress-low{
+    background:#3b82f6;
+}
+
+.ct-volume-progress-normal{
+    background:#16a34a;
+}
+
+.ct-volume-progress-high{
+    background:#f59e0b;
+}
+
+.ct-volume-progress-overload{
+    background:#dc2626;
+}
+
+.ct-volume-status{
+    display:inline-flex;
+    align-items:center;
+    margin-top:7px;
+    padding:3px 7px;
+    border-radius:999px;
+    font-size:9px;
+    font-weight:700;
+}
+
+.ct-volume-status-low{
+    background:#dbeafe;
+    color:#1d4ed8;
+}
+
+.ct-volume-status-normal{
+    background:#dcfce7;
+    color:#166534;
+}
+
+.ct-volume-status-high{
+    background:#fef3c7;
+    color:#92400e;
+}
+
+.ct-volume-status-overload{
+    background:#fee2e2;
+    color:#991b1b;
+}
+
+.dark .ct-volume-status-low{
+    background:rgba(30,64,175,.25);
+    color:#93c5fd;
+}
+
+.dark .ct-volume-status-normal{
+    background:rgba(22,101,52,.25);
+    color:#86efac;
+}
+
+.dark .ct-volume-status-high{
+    background:rgba(146,64,14,.25);
+    color:#fcd34d;
+}
+
+.dark .ct-volume-status-overload{
+    background:rgba(153,27,27,.25);
+    color:#fca5a5;
+}
+
+.ct-volume-meta{
+    display:grid;
+    grid-template-columns:
+        repeat(3,minmax(0,1fr));
+    gap:8px;
+    margin-top:9px;
+}
+
+.ct-volume-meta div{
+    background:#fff;
+    border-radius:8px;
+    padding:7px 8px;
+}
+
+.dark .ct-volume-meta div{
+    background:#111827;
+}
+
+.ct-volume-meta span,
+.ct-volume-meta strong{
+    display:block;
+}
+
+.ct-volume-meta span{
+    font-size:9px;
+    color:#6b7280;
+}
+
+.ct-volume-meta strong{
+    margin-top:2px;
+    font-size:10px;
+}
+
+@media(max-width:768px){
+    .ct-volume-meta{
         grid-template-columns:1fr;
     }
 }

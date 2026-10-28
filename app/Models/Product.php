@@ -8,6 +8,19 @@ class Product extends Model
 {
     protected $table = 'products';
 
+    protected $fillable = [
+        'code',
+        'name',
+        'box_type',
+        'carton_length_cm',
+        'carton_width_cm',
+        'carton_height_cm',
+        'units_per_carton',
+        'units_per_pack',
+        'unit_volume_cm3',
+        'carton_volume_cm3',
+    ];
+
     protected $casts = [
         'carton_length_cm' => 'float',
         'carton_width_cm' => 'float',
@@ -20,7 +33,7 @@ class Product extends Model
         'carton_volume_cm3' => 'float',
     ];
 
-    public function getCalculatedCartonVolumeM3Attribute(): float
+    public function getCalculatedCartonVolumeCm3Attribute(): float
     {
         if (
             ! $this->carton_length_cm
@@ -30,16 +43,15 @@ class Product extends Model
             return 0;
         }
 
-        return (
+        return
             (float) $this->carton_length_cm
             *
             (float) $this->carton_width_cm
             *
-            (float) $this->carton_height_cm
-        ) / 1_000_000;
+            (float) $this->carton_height_cm;
     }
 
-    public function getCalculatedUnitVolumeM3Attribute(): float
+    public function getCalculatedUnitVolumeCm3Attribute(): float
     {
         if (
             ! $this->units_per_carton
@@ -49,12 +61,12 @@ class Product extends Model
         }
 
         return
-            $this->calculated_carton_volume_m3
+            $this->calculated_carton_volume_cm3
             /
             $this->units_per_carton;
     }
 
-    public function getPackVolumeM3Attribute(): float
+    public function getPackVolumeCm3Attribute(): float
     {
         if (
             ! $this->units_per_pack
@@ -64,7 +76,7 @@ class Product extends Model
         }
 
         return
-            $this->calculated_unit_volume_m3
+            $this->calculated_unit_volume_cm3
             *
             $this->units_per_pack;
     }

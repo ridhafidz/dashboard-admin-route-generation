@@ -9,12 +9,14 @@ enum BoxType: string implements HasColor, HasLabel
 {
     case ColdStorage = 'cold_storage';
     case Dry = 'dry';
+    case Khusus = 'khusus';
 
     public function getLabel(): string
     {
         return match ($this) {
             self::ColdStorage => 'Cold Storage',
             self::Dry => 'Dry',
+            self::Khusus => 'Khusus',
         };
     }
 
@@ -23,6 +25,7 @@ enum BoxType: string implements HasColor, HasLabel
         return match ($this) {
             self::ColdStorage => 'info',
             self::Dry => 'gray',
+            self::Khusus => 'success',
         };
     }
 }

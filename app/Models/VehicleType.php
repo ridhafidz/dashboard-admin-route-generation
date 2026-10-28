@@ -8,16 +8,18 @@ class VehicleType extends Model
 {
     protected $table = 'vehicle_types';
 
+    protected $fillable = [
+        'category',
+        'box_type',
+        'length_cm',
+        'width_cm',
+        'height_cm',
+    ];
+
     protected $casts = [
         'length_cm' => 'float',
         'width_cm' => 'float',
         'height_cm' => 'float',
-
-        'volume_m3' => 'float',
-
-        'packing_utilization' => 'float',
-
-        'capacity_weight_kg' => 'float',
     ];
 
     public function getCalculatedVolumeM3Attribute(): float
@@ -41,13 +43,24 @@ class VehicleType extends Model
 
     public function getUsableVolumeM3Attribute(): float
     {
+        $volumeM3 =
+            (float) (
+                $this->volume_m3
+                ?? 0
+            );
+
+        if ($volumeM3 <= 0) {
+            $volumeM3 =
+                $this->calculated_volume_m3;
+        }
+
         $utilization =
             $this->packing_utilization > 0
-                ? $this->packing_utilization
+                ? (float) $this->packing_utilization
                 : 1;
 
         return
-            $this->calculated_volume_m3
+            $volumeM3
             *
             $utilization;
     }
